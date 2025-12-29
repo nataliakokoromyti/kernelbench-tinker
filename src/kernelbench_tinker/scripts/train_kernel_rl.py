@@ -106,10 +106,6 @@ def main():
     cfg = blueprint.make()
 
     logger.info("Starting KernelBench RL Training")
-    logger.info(f"Mode: {cfg.mode}")
-    if cfg.mode == "multi_turn":
-        logger.info(f"  Max turns: {cfg.max_turns}")
-        logger.info(f"  Gamma (discount): {cfg.gamma}")
     logger.info(f"Model: {cfg.model_name}")
     logger.info(f"Level: {cfg.dataset_builder.level}")
     logger.info(f"Batch size: {cfg.dataset_builder.batch_size}")
