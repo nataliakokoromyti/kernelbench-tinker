@@ -16,22 +16,12 @@ import sys
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TypedDict, Optional, Any, TYPE_CHECKING
+from typing import TypedDict, Optional, Any
 import logging
 
 import torch
 
-if TYPE_CHECKING:
-    from kernelbench_tinker.rag.retriever import KernelRetriever
-
 logger = logging.getLogger(__name__)
-
-# Regex patterns for parsing structured output (Kevin/Qwen3 style)
-# Thinking block patterns - supports <think>, <thinking>, <THOUGHT> variants
-THINKING_PATTERN = re.compile(
-    r"<(?:think|thinking|THOUGHT)>(.*?)</(?:think|thinking|THOUGHT)>",
-    re.DOTALL | re.IGNORECASE
-)
 
 # Kernel block pattern - code inside <KERNEL>...</KERNEL>
 KERNEL_BLOCK_PATTERN = re.compile(
@@ -48,8 +38,8 @@ KERNEL_BLOCK_SIMPLE_PATTERN = re.compile(
 
 @dataclass
 class ParsedResponse:
-    """Parsed model response with thinking and kernel blocks."""
-    thought: str  # Content from <think>/<THOUGHT> block (may be empty)
+    """Parsed model response with kernel blocks."""
+    thought: str  # Reserved; not used in this integration (always empty)
     kernel: str   # Kernel code (from <KERNEL> block or extracted code block)
     raw: str      # Original raw response
     format_ok: bool  # Whether we successfully extracted kernel code
@@ -57,7 +47,7 @@ class ParsedResponse:
 
 def parse_structured_response(text: str) -> ParsedResponse:
     """
-    Parse model response with Kevin/Qwen3 structured format.
+    Parse model response with structured format.
 
     Expected format:
         <think>
@@ -71,8 +61,6 @@ def parse_structured_response(text: str) -> ParsedResponse:
         </KERNEL>
 
     Also handles:
-    - <thinking>...</thinking> and <THOUGHT>...</THOUGHT> variants
-    - Missing thinking block (thought will be empty string)
     - Missing <KERNEL> tags (falls back to extract_code_block)
     - Plain code without any tags
 
@@ -85,13 +73,6 @@ def parse_structured_response(text: str) -> ParsedResponse:
     raw = text
     thought = ""
     kernel = ""
-
-    # Extract thinking block (optional)
-    think_match = THINKING_PATTERN.search(text)
-    if think_match:
-        thought = think_match.group(1).strip()
-        # Remove thinking block from text for kernel extraction
-        text = THINKING_PATTERN.sub("", text).strip()
 
     # Try to extract kernel from <KERNEL> block
     kernel_match = KERNEL_BLOCK_PATTERN.search(text)
@@ -123,73 +104,6 @@ def parse_structured_response(text: str) -> ParsedResponse:
         raw=raw,
         format_ok=format_ok,
     )
-
-
-def strip_thinking_tokens(text: str) -> str:
-    """
-    Strip thinking/reasoning tokens from model output.
-
-    DEPRECATED: Use parse_structured_response() instead for proper handling.
-    This function is kept for backwards compatibility.
-
-    Args:
-        text: Raw model output text
-
-    Returns:
-        Text with thinking tokens removed
-    """
-    return THINKING_PATTERN.sub("", text).strip()
-
-
-# Global retriever instance (lazy-loaded with async lock for thread safety)
-_global_retriever: "KernelRetriever | None" = None
-_retriever_lock: asyncio.Lock | None = None  # Lazily initialized to avoid "no running event loop"
-
-
-def _get_retriever_lock() -> asyncio.Lock:
-    """Get or create the retriever lock (must be called from async context)."""
-    global _retriever_lock
-    if _retriever_lock is None:
-        _retriever_lock = asyncio.Lock()
-    return _retriever_lock
-
-
-async def get_global_retriever(index_path: str | None = None) -> "KernelRetriever | None":
-    """Get or load the global RAG retriever (async, thread-safe)."""
-    global _global_retriever
-
-    # Fast path: already loaded
-    if _global_retriever is not None:
-        return _global_retriever
-
-    # Slow path: need to load (protected by lock)
-    if index_path:
-        lock = _get_retriever_lock()
-        async with lock:
-            # Double-check after acquiring lock
-            if _global_retriever is None:
-                from kernelbench_tinker.rag.retriever import KernelRetriever
-                logger.info(f"Loading RAG index from {index_path}")
-                _global_retriever = KernelRetriever.load(index_path)
-
-    return _global_retriever
-
-
-def set_global_retriever(retriever: "KernelRetriever") -> None:
-    """Set the global RAG retriever."""
-    global _global_retriever
-    _global_retriever = retriever
-
-
-def get_global_retriever_sync() -> "KernelRetriever | None":
-    """
-    Get the global RAG retriever synchronously.
-
-    This returns the cached retriever without attempting to load.
-    Use this in sync code paths where the retriever was already set
-    via set_global_retriever().
-    """
-    return _global_retriever
 
 
 class KernelEvalResult(TypedDict):
@@ -398,7 +312,6 @@ def get_prompt_for_problem(
     backend: str = "triton",
     option: str = "one_shot",
     dataset_src: str = "huggingface",
-    raicl_k: int = 3,
 ) -> str:
     """
     Get the prompt for a KernelBench problem.
@@ -407,20 +320,14 @@ def get_prompt_for_problem(
         level: KernelBench level (1, 2, 3, or 4)
         problem_id: Problem ID within the level
         backend: Backend type ("cuda", "triton", "cute", "tilelang")
-        option: Prompt option ("zero_shot", "one_shot", "few_shot", "raicl")
+        option: Prompt option ("zero_shot", "one_shot", "few_shot")
         dataset_src: Either "huggingface" or "local"
-        raicl_k: Number of examples to retrieve for RA-ICL
 
     Returns:
         The prompt string for the model
     """
     ref_code = get_reference_code(level, problem_id, dataset_src)
 
-    # Handle RA-ICL option - doesn't require local KernelBench
-    if option == "raicl":
-        return get_raicl_prompt_for_code(ref_code, backend, k=raicl_k)
-
-    # Non-raicl options require local KernelBench prompt constructor
     _ensure_kernelbench_imported()
     from src.prompt_constructor_toml import get_prompt_for_backend
 
@@ -433,41 +340,6 @@ def get_prompt_for_problem(
     )
 
     return prompt
-
-
-def get_raicl_prompt_for_code(
-    ref_code: str,
-    backend: str,
-    k: int = 3,
-) -> str:
-    """
-    Get RA-ICL prompt for given reference code.
-
-    Args:
-        ref_code: Reference PyTorch code
-        backend: Target backend ("triton" or "cuda")
-        k: Number of examples to retrieve
-
-    Returns:
-        RA-ICL prompt with retrieved examples
-    """
-    retriever = get_global_retriever_sync()
-
-    if retriever is None:
-        logger.warning("RAG retriever not loaded, falling back to one_shot")
-        from src.prompt_constructor_toml import get_prompt_for_backend
-        return get_prompt_for_backend(
-            ref_code,
-            backend,
-            option="one_shot",
-            precision="fp32",
-            include_hardware=False,
-        )
-
-    from kernelbench_tinker.rag.prompt_builder import RAICLPromptBuilder
-
-    builder = RAICLPromptBuilder(retriever)
-    return builder.build_prompt(ref_code, backend, k=k)
 
 
 def evaluate_kernel(
@@ -985,8 +857,7 @@ class KernelBenchProblem:
     problem_id: int
     backend: str = "triton"
     dataset_src: str = "huggingface"
-    prompt_option: str = "one_shot"  # "zero_shot", "one_shot", "few_shot", "raicl"
-    raicl_k: int = 3  # Number of examples for RA-ICL
+    prompt_option: str = "one_shot"  # "zero_shot", "one_shot", "few_shot"
 
     _ref_code: str | None = field(default=None, repr=False)
     _prompt: str | None = field(default=None, repr=False)
@@ -1010,18 +881,8 @@ class KernelBenchProblem:
                 self.backend,
                 option=self.prompt_option,
                 dataset_src=self.dataset_src,
-                raicl_k=self.raicl_k,
             )
         return self._prompt
-
-    def get_raicl_system_prompt(self) -> str:
-        """Get the RA-ICL system prompt for this backend."""
-        from kernelbench_tinker.rag.prompt_builder import RAICLPromptBuilder
-        retriever = get_global_retriever_sync()
-        if retriever is None:
-            return ""
-        builder = RAICLPromptBuilder(retriever)
-        return builder.build_system_prompt(self.backend)
 
     def evaluate(
         self,

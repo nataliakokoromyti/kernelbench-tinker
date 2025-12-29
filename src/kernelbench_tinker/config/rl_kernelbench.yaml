@@ -100,8 +100,6 @@ dataset_builder:
 
     # Prompt configuration (no RA-ICL in this repo)
     prompt_option: "one_shot"
-    rag_index_path: null
-    raicl_k: 0
 
     # ==========================================================================
     # Modal Configuration (Isolated GPU Evaluation)

@@ -728,8 +728,6 @@ async def run_training_loop(
                 renderer_name=cfg.dataset_builder.renderer_name,
                 test_fraction=cfg.dataset_builder.test_fraction,
                 prompt_option=cfg.dataset_builder.prompt_option,
-                rag_index_path=cfg.dataset_builder.rag_index_path,
-                raicl_k=cfg.dataset_builder.raicl_k,
                 use_modal=cfg.dataset_builder.use_modal,
                 modal_gpu_type=cfg.dataset_builder.modal_gpu_type,
                 modal_timeout=cfg.dataset_builder.modal_timeout,

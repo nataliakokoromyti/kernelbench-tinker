@@ -236,45 +236,15 @@ class MultiTurnState:
     max_turns: int
     prompt_base: str           # static part: problem + PyTorch ref + instructions
     ra_icl_snippet: str        # static RA-ICL examples for this problem
-    history: list[dict]        # list of {kernel, thought, eval_result, score} dicts
+    history: list[dict]        # list of {kernel, eval_result, score} dicts
     last_kernel: str | None
-    last_thought: str | None   # Last thinking content (for logging, not fed to next turn)
     last_eval: KernelEvalResult | None
     step_scores: list[float]   # scores for each completed step
     done: bool
     success: bool              # True if solved with correct + speedup threshold
 
 
-# Multi-turn prompt templates (Kevin/Qwen3 structured format)
-MULTITURN_SYSTEM_PROMPT_WITH_THINK = """You are an expert GPU kernel developer. Your task is to optimize PyTorch operations by writing efficient custom {backend} kernels.
-
-When given a PyTorch model and optimization examples, write an optimized kernel implementation. If a previous attempt failed, fix the errors based on the feedback provided.
-
-Your solution must:
-- Be a drop-in replacement as a class named `ModelNew`
-- Use custom {backend} kernels, not just PyTorch operations
-- Be correct and produce the same results as the reference
-
-You MUST respond in exactly this format:
-
-<think>
-1-5 short bullet points describing:
-- What you plan to change or optimize this turn
-- How you are addressing previous errors (if any)
-- Key implementation details
-
-Keep this section under 150 tokens.
-</think>
-
-<KERNEL>
-```python
-# Your complete optimized implementation here
-class ModelNew(nn.Module):
-    ...
-```
-</KERNEL>"""
-
-# Kevin-style prompt without thinking tokens (saves context, matches paper)
+# Multi-turn prompt template (structured format)
 MULTITURN_SYSTEM_PROMPT_NO_THINK = """You are an expert GPU kernel developer. Your task is to optimize PyTorch operations by writing efficient custom {backend} kernels.
 
 When given a PyTorch model and optimization examples, write an optimized kernel implementation. If a previous attempt failed, fix the errors based on the feedback provided.
@@ -316,10 +286,6 @@ REFINEMENT_TEMPLATE = """
 
 Keep what works. Do not change the function signature unless necessary. Do not use PyTorch APIs for the core computation.
 """
-# NOTE: Kevin-32B removes thinking/CoT from multi-turn prompts for context management.
-# "each prompt will now only include the previously generated kernels and evaluation results"
-# The thinking_section was removed from this template per Kevin paper (arXiv:2507.11948).
-
 ERROR_SECTION_TEMPLATE = """### Error Details
 ```
 {error_text}
@@ -380,8 +346,6 @@ class MultiTurnKernelBenchEnv(Env):
         self.speedup_threshold = speedup_threshold
         self.use_modal = use_modal
         self.modal_timeout = modal_timeout
-        # Kevin-style configs set thinking_weight=0 to remove thinking tokens for context saving
-        self._include_think = self.reward_config.thinking_weight > 0
         self._current_prompt_messages: list[renderers.Message] | None = None
         self._current_observation: tinker.ModelInput | None = None
 
@@ -389,12 +353,7 @@ class MultiTurnKernelBenchEnv(Env):
         if system_prompt:
             self._system_prompt = system_prompt
         else:
-            prompt_template = (
-                MULTITURN_SYSTEM_PROMPT_WITH_THINK
-                if self._include_think
-                else MULTITURN_SYSTEM_PROMPT_NO_THINK
-            )
-            self._system_prompt = prompt_template.format(
+            self._system_prompt = MULTITURN_SYSTEM_PROMPT_NO_THINK.format(
                 backend=problem.backend.upper()
             )
 
@@ -416,11 +375,7 @@ class MultiTurnKernelBenchEnv(Env):
     def _build_ra_icl_snippet(self) -> str:
         """Build the RA-ICL examples snippet (cached per problem)."""
         # Use the problem's prompt which already includes RA-ICL if configured
-        if self.problem.prompt_option == "raicl":
-            return self.problem.prompt
-        else:
-            # For non-raicl, just use the basic prompt
-            return self.problem.prompt
+        return self.problem.prompt
 
     def _build_initial_messages(self) -> list[renderers.Message]:
         """Build messages for turn 0."""
@@ -476,11 +431,6 @@ class MultiTurnKernelBenchEnv(Env):
             if not guidance:
                 guidance = "Fix the issues in the previous attempt and try again."
 
-            # NOTE: Kevin-32B removes thinking/CoT from multi-turn prompts
-            # "each prompt will now only include the previously generated kernels
-            # and evaluation results" - arXiv:2507.11948
-            # We still track last_thought for logging/analysis, but don't include in prompt
-
             refinement_text = REFINEMENT_TEMPLATE.format(
                 turn=self.state.turn_idx,
                 previous_kernel=_truncate_kernel(self.state.last_kernel),
@@ -492,12 +442,7 @@ class MultiTurnKernelBenchEnv(Env):
                 error_section=error_section,
                 guidance=guidance,
             )
-            if self._include_think:
-                refinement_text += (
-                    "\nRemember: respond using <think>...</think> followed by <KERNEL>...</KERNEL>."
-                )
-            else:
-                refinement_text += "\nRemember: respond using <KERNEL>...</KERNEL>."
+            refinement_text += "\nRemember: respond using <KERNEL>...</KERNEL>."
 
             user_content_parts.append(refinement_text)
 
@@ -520,7 +465,6 @@ class MultiTurnKernelBenchEnv(Env):
             ra_icl_snippet=self._build_ra_icl_snippet(),
             history=[],
             last_kernel=None,
-            last_thought=None,
             last_eval=None,
             step_scores=[],
             done=False,
@@ -546,15 +490,10 @@ class MultiTurnKernelBenchEnv(Env):
         message, parse_success = self.renderer.parse_response(action)
         response_text = message.get("content", "")
 
-        # Parse structured response (extracts <think> and <KERNEL> blocks)
+        # Parse structured response (extracts <KERNEL> block)
         parsed = parse_structured_response(response_text)
         kernel_code = parsed.kernel
         state.last_kernel = kernel_code
-        state.last_thought = parsed.thought
-
-        # Log thinking content if present (for debugging/analysis)
-        if parsed.thought:
-            logtree.log_text(f"Thought (Turn {state.turn_idx}): {parsed.thought[:200]}...")
 
         # Check format validity
         format_ok = parsed.format_ok
@@ -586,15 +525,14 @@ class MultiTurnKernelBenchEnv(Env):
         state.last_eval = eval_result
         eval_time = time.perf_counter() - eval_start
 
-        # Compute per-step score (includes thinking bonus)
-        step_score = compute_reward(eval_result, self.reward_config, thought_length=len(parsed.thought))
+        # Compute per-step score
+        step_score = compute_reward(eval_result, self.reward_config, thought_length=0)
         state.step_scores.append(step_score)
 
-        # Store in history (includes thought for logging, but thought is NOT fed to next turn)
+        # Store in history
         state.history.append({
             "turn": state.turn_idx,
             "kernel": kernel_code,
-            "thought": parsed.thought,  # For logging/analysis only
             "eval_result": eval_result,
             "score": step_score,
         })
@@ -640,8 +578,6 @@ class MultiTurnKernelBenchEnv(Env):
             "step_score": step_score,
             "episode_done": float(state.done),
             "episode_success": float(state.success),
-            "thought_length": len(parsed.thought),  # Track thinking token usage
-            "has_thought": float(bool(parsed.thought)),
         }
         if eval_result.get("speedup"):
             metrics["speedup"] = eval_result["speedup"]
@@ -702,21 +638,19 @@ class MultiTurnKernelBenchEnv(Env):
             "backend": self.problem.backend,
             "dataset_src": self.problem.dataset_src,
             "prompt_option": self.problem.prompt_option,
-            "raicl_k": self.problem.raicl_k,
             "turn": self.state.turn_idx - 1,  # turn just completed
             "max_turns": self.state.max_turns,
             "prompt_messages": self._current_prompt_messages,
             "renderer": getattr(self.renderer, "name", type(self.renderer).__name__),
             "response": {
                 "raw": parsed.raw,
-                "thought": parsed.thought,
                 "kernel": parsed.kernel,
                 "format_ok": format_ok,
             },
             "eval_result": eval_result,
             "reward": reward,
             "reward_breakdown": compute_reward_breakdown(
-                eval_result, self.reward_config, thought_length=len(parsed.thought)
+                eval_result, self.reward_config, thought_length=0
             ),
             "metrics": metrics,
             "state": {
@@ -926,7 +860,7 @@ class MultiTurnKernelBenchDatasetBuilder(RLDatasetBuilder):
     reward_correctness_weight: float = 1.0
     reward_speed_weight: float = 0.0
     reward_length_weight: float = 0.05
-    reward_thinking_weight: float = 0.1  # Reward for using <think> blocks
+    reward_thinking_weight: float = 0.0
 
     # Renderer
     renderer_name: str = "qwen3"
@@ -935,9 +869,7 @@ class MultiTurnKernelBenchDatasetBuilder(RLDatasetBuilder):
     test_fraction: float = 0.1
 
     # Prompt configuration
-    prompt_option: str = "raicl"  # RA-ICL recommended for multi-turn
-    rag_index_path: str | None = None
-    raicl_k: int = 3
+    prompt_option: str = "one_shot"  # "zero_shot", "one_shot", "few_shot"
 
     # Modal configuration (isolated GPU evaluation)
     use_modal: bool = True
@@ -946,15 +878,6 @@ class MultiTurnKernelBenchDatasetBuilder(RLDatasetBuilder):
 
     async def __call__(self, tokenizer=None) -> tuple[RLDataset, RLDataset | None]:
         """Build train and optional test datasets."""
-
-        # Load RAG index if using raicl
-        if self.prompt_option == "raicl":
-            if not self.rag_index_path:
-                raise ValueError("rag_index_path required for raicl prompt_option")
-            from kernelbench_tinker.rag.retriever import KernelRetriever
-            retriever = KernelRetriever.load(self.rag_index_path)
-            set_global_retriever(retriever)
-            logger.info(f"Loaded RAG index from {self.rag_index_path}")
 
         # Get problem IDs
         problem_ids = get_problem_ids(
@@ -972,7 +895,6 @@ class MultiTurnKernelBenchDatasetBuilder(RLDatasetBuilder):
                 backend=self.backend,
                 dataset_src=self.dataset_src,
                 prompt_option=self.prompt_option,
-                raicl_k=self.raicl_k,
             )
             for pid in problem_ids
         ]

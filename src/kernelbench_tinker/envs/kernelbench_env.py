@@ -41,8 +41,6 @@ from kernelbench_tinker.envs.kernelbench_client import (
     get_problem_ids,
     extract_code_block,
     parse_structured_response,
-    get_global_retriever,
-    set_global_retriever,
 )
 from kernelbench_tinker.training.reward import compute_reward, compute_reward_breakdown, RewardConfig
 from kernelbench_tinker.training.trace_logger import get_trace_logger
@@ -65,15 +63,6 @@ Your kernel should:
 - Use the specified backend (Triton, CUDA, etc.)
 
 You MUST respond in exactly this format:
-
-<think>
-1-5 short bullet points describing:
-- What optimization strategy you will use
-- Key implementation details (tiling, memory layout, etc.)
-- Any constraints or edge cases to handle
-
-Keep this section under 150 tokens.
-</think>
 
 <KERNEL>
 ```python
@@ -185,14 +174,10 @@ class KernelBenchEnv(Env):
         message, parse_success = self.renderer.parse_response(action)
         response_text = message.get("content", "")
 
-        # Parse structured response (extracts <think> and <KERNEL> blocks)
+        # Parse structured response (extracts <KERNEL> block)
         parsed = parse_structured_response(response_text)
         kernel_code = parsed.kernel
         self._last_kernel = kernel_code
-
-        # Log thinking content if present (for debugging/analysis)
-        if parsed.thought:
-            logtree.log_text(f"Thought: {parsed.thought[:200]}...")
 
         # Check format validity
         format_ok = parsed.format_ok
@@ -224,8 +209,8 @@ class KernelBenchEnv(Env):
         self._last_result = eval_result
         eval_time = time.perf_counter() - eval_start
 
-        # Compute reward (includes thinking bonus)
-        reward = compute_reward(eval_result, self.reward_config, thought_length=len(parsed.thought))
+        # Compute reward
+        reward = compute_reward(eval_result, self.reward_config, thought_length=0)
 
         # Log the attempt
         logtree.log_text(f"Problem: Level {self.problem.level}, ID {self.problem.problem_id}")
@@ -250,8 +235,6 @@ class KernelBenchEnv(Env):
             "tests_passed": eval_result["tests_passed"],
             "tests_total": eval_result["tests_total"],
             "cheated": float(eval_result["cheated"]),
-            "thought_length": len(parsed.thought),  # Track thinking token usage
-            "has_thought": float(bool(parsed.thought)),
         }
         if eval_result.get("speedup"):
             metrics["speedup"] = eval_result["speedup"]
@@ -306,20 +289,18 @@ class KernelBenchEnv(Env):
             "backend": self.problem.backend,
             "dataset_src": self.problem.dataset_src,
             "prompt_option": self.problem.prompt_option,
-            "raicl_k": self.problem.raicl_k,
             "turn": self._turn - 1,  # step just completed
             "prompt_messages": self._current_prompt_messages,
             "renderer": getattr(self.renderer, "name", type(self.renderer).__name__),
             "response": {
                 "raw": parsed.raw,
-                "thought": parsed.thought,
                 "kernel": parsed.kernel,
                 "format_ok": format_ok,
             },
             "eval_result": eval_result,
             "reward": reward,
             "reward_breakdown": compute_reward_breakdown(
-                eval_result, self.reward_config, thought_length=len(parsed.thought)
+                eval_result, self.reward_config, thought_length=0
             ),
             "metrics": metrics,
             "timestamp": time.time(),
@@ -516,7 +497,7 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     reward_correctness_weight: float = 1.0
     reward_speed_weight: float = 0.0
     reward_length_weight: float = 0.05  # Tie-breaking for uniform rewards
-    reward_thinking_weight: float = 0.1  # Reward for using <think> blocks
+    reward_thinking_weight: float = 0.0
 
     # Renderer
     renderer_name: str = "qwen3"
@@ -525,9 +506,7 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     test_fraction: float = 0.1
 
     # Prompt configuration
-    prompt_option: str = "one_shot"  # "zero_shot", "one_shot", "few_shot", "raicl"
-    rag_index_path: str | None = None  # Path to RAG index (required for raicl)
-    raicl_k: int = 3  # Number of examples to retrieve for RA-ICL
+    prompt_option: str = "one_shot"  # "zero_shot", "one_shot", "few_shot"
 
     # Modal configuration (isolated GPU evaluation)
     use_modal: bool = True  # Use Modal for isolated evaluation
@@ -540,15 +519,6 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
         Args:
             tokenizer: The tokenizer to use for the renderer. Required for most renderers.
         """
-        # Load RAG index if using raicl prompts
-        if self.prompt_option == "raicl":
-            if not self.rag_index_path:
-                raise ValueError("rag_index_path is required when using raicl prompt_option")
-            from kernelbench_tinker.rag.retriever import KernelRetriever
-            retriever = KernelRetriever.load(self.rag_index_path)
-            set_global_retriever(retriever)
-            logger.info(f"Loaded RAG index from {self.rag_index_path}")
-
         # Get problem IDs
         problem_ids = get_problem_ids(
             self.level,
@@ -565,7 +535,6 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
                 backend=self.backend,
                 dataset_src=self.dataset_src,
                 prompt_option=self.prompt_option,
-                raicl_k=self.raicl_k,
             )
             for pid in problem_ids
         ]
