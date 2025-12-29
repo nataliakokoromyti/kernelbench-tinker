@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kernel-rl"
+version = "0.1.0"
+description = "RL training for GPU kernel optimization using Tinker and KernelBench"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = {text = "MIT"}
+authors = [
+    {name = "Kernel RL Team"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "tinker",
+    "tinker-cookbook",
+    "src",  # KernelBench package
+    "torch>=2.0.0",
+    "numpy",
+    "pyyaml",
+    "pydantic>=2.0.0",
+    "datasets",
+    "tqdm",
+    "chz",
+    "python-dotenv",
+    # KernelBench dependencies
+    "pydra-config",
+    "tomli",
+    "litellm",
+    "hf-transfer>=0.1.9",
+    # Visualization
+    "tensorboard>=2.15.0",
+    # RAG dependencies
+    "faiss-cpu>=1.7.0",
+    "sentence-transformers>=2.2.0",
+    # Modal Labs for isolated GPU evaluation
+    "modal>=0.64.0",
+    "matplotlib>=3.10.7",
+    "mlx>=0.30.0",
+    "mlx-lm>=0.28.4",
+    "mlx-embedding-models>=0.0.11",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "mypy",
+]
+mlx = [
+    "mlx>=0.30.0",
+    "mlx-embedding-models>=0.0.11",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "mypy",
+]
+
+[tool.uv.sources]
+# tinker-cookbook from git (pinned commit)
+tinker-cookbook = { git = "https://github.com/thinking-machines-lab/tinker-cookbook.git", rev = "989f84926245b227634797b8eac46abe232f9c24" }
+# KernelBench from git (package name is "src", pinned commit)
+src = { git = "https://github.com/ScalingIntelligence/KernelBench.git", rev = "404ee91422cdb78646947faba2cce4c03601bc52" }
+
+[project.scripts]
+train-kernel-rl = "kernel_rl.scripts.train_kernel_rl:main"
+eval-kernel-rl = "kernel_rl.scripts.eval_kernel_rl:main"
+build-rag-index = "kernel_rl.scripts.build_rag_index:main"
+rl-dashboard = "rl_dashboard.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kernel_rl*", "rl_dashboard*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

@@ -111,10 +111,10 @@ dataset_builder:
     # Renderer (should match model)
     renderer_name: "qwen3"
 
-    # RA-ICL Configuration (retrieval-augmented prompts)
-    prompt_option: "raicl"
-    rag_index_path: "./kernel_rag_index"
-    raicl_k: 3 # Number of examples to retrieve
+    # Prompt configuration (no RA-ICL in this repo)
+    prompt_option: "one_shot"
+    rag_index_path: null
+    raicl_k: 0
 
     # ==========================================================================
     # Modal Configuration (Isolated GPU Evaluation)
