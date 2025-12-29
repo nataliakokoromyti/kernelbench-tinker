@@ -124,7 +124,7 @@ async def generate_kernel(
     # Parse structured response (extracts <think> and <KERNEL> blocks)
     parsed = parse_structured_response(content)
 
-    # Return just the kernel code (thought is discarded for evaluation)
+    # Return just the kernel code
     return parsed.kernel if parsed.kernel else content
 
 

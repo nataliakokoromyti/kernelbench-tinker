@@ -39,7 +39,6 @@ KERNEL_BLOCK_SIMPLE_PATTERN = re.compile(
 @dataclass
 class ParsedResponse:
     """Parsed model response with kernel blocks."""
-    thought: str  # Reserved; not used in this integration (always empty)
     kernel: str   # Kernel code (from <KERNEL> block or extracted code block)
     raw: str      # Original raw response
     format_ok: bool  # Whether we successfully extracted kernel code
@@ -68,10 +67,9 @@ def parse_structured_response(text: str) -> ParsedResponse:
         text: Raw model output
 
     Returns:
-        ParsedResponse with thought, kernel, raw text, and format_ok flag
+        ParsedResponse with kernel, raw text, and format_ok flag
     """
     raw = text
-    thought = ""
     kernel = ""
 
     # Try to extract kernel from <KERNEL> block
@@ -99,7 +97,6 @@ def parse_structured_response(text: str) -> ParsedResponse:
     format_ok = bool(kernel) and ("class ModelNew" in kernel or "def forward" in kernel)
 
     return ParsedResponse(
-        thought=thought,
         kernel=kernel,
         raw=raw,
         format_ok=format_ok,
