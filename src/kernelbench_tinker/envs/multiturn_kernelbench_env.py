@@ -47,8 +47,6 @@ from kernelbench_tinker.envs.kernelbench_client import (
     extract_code_block,
     parse_structured_response,
     get_problem_ids,
-    get_global_retriever,
-    set_global_retriever,
 )
 from typing import TYPE_CHECKING
 
