@@ -1,13 +1,7 @@
-# KernelBench RL Training Configuration (Kevin-32B Compatible)
+# KernelBench RL Training Configuration (Integration Default)
 # =============================================================
 #
-# Configuration aligned with Kevin-32B paper (arXiv:2507.11948):
-# - Multi-turn refinement with discounted returns (gamma=0.4)
-# - Kevin reward formula: S = 0.3??correct + speedup
-# - No length penalties (causes response collapse)
-# - No thinking rewards (thinking removed from prompts)
-# - Binary correctness (no partial credit)
-# - Zero reward for cheating (PyTorch wrapping, try-except, pass)
+# Default config for the KernelBench ↔ Tinker integration.
 #
 # Required Environment Variables:
 #   TINKER_API_KEY       - Tinker distributed training API key
@@ -21,7 +15,6 @@
 
 # =============================================================================
 # Model Configuration
-# Kevin uses QwQ-32B, we use Qwen3-30B-A3B (similar architecture)
 # =============================================================================
 model_name: "Qwen/Qwen3-30B-A3B"
 lora_rank: 64  # Tinker max for Qwen3-30B-A3B
@@ -29,7 +22,6 @@ learning_rate: 0.000002 # Kevin uses 2e-6 (very conservative)
 
 # =============================================================================
 # Generation Configuration
-# Kevin uses 16K initially, extends to 22K at step 30
 # =============================================================================
 max_tokens: 16384 # Kevin uses 16K-22K tokens
 temperature: 1.0
@@ -37,17 +29,16 @@ temperature: 1.0
 # =============================================================================
 # Training Mode
 # =============================================================================
-mode: "multi_turn" # Kevin-style multi-turn refinement
+mode: "single_turn"
 
 # =============================================================================
-# Multi-Turn Configuration (Kevin Mode)
+# Multi-Turn Configuration (only used when mode=multi_turn)
 # =============================================================================
 max_turns: 4 # Kevin uses T=4 refinement attempts
 gamma: 0.4 # Kevin paper: gamma=0.4 works best
 
 # =============================================================================
 # Training Configuration
-# Kevin: 2 gradient steps per batch, aggressive gradient clipping (0.05)
 # =============================================================================
 num_substeps: 2 # Kevin uses 2 gradient steps per batch
 loss_fn: "importance_sampling"
@@ -72,7 +63,6 @@ wandb_name: null
 
 # =============================================================================
 # Dataset Configuration
-# Kevin: 8 tasks per batch, 16 parallel trajectories per task
 # =============================================================================
 dataset_builder:
     # Problem selection
@@ -83,10 +73,8 @@ dataset_builder:
     dataset_src: "huggingface"
 
     # Training configuration
-    # Kevin: 8 tasks ?? 16 trajectories = 128 samples per batch
-    # Adjust based on your GPU memory
-    batch_size: 8 # Kevin uses 8 tasks per batch
-    group_size: 16 # Kevin uses 16 parallel trajectories per task
+    batch_size: 8
+    group_size: 16
     num_epochs: 22
     shuffle: true
 
@@ -95,15 +83,14 @@ dataset_builder:
     measure_performance: true # Enable for speed rewards (Kevin uses speedup)
 
     # ==========================================================================
-    # Reward configuration (Kevin-32B compatible)
-    # Kevin formula: S = 0.3??correct + speedup
+    # Reward configuration
     # ==========================================================================
     reward_format_weight: 0.0 # Kevin doesn't use
     reward_compile_weight: 0.0 # Kevin doesn't use
-    reward_correctness_weight: 0.3 # Kevin uses 0.3 for binary correctness
-    reward_speed_weight: 1.0 # Kevin adds speedup directly
-    reward_length_weight: 0.0 # Kevin: causes response collapse
-    reward_thinking_weight: 0.0 # Kevin removes thinking from prompts
+    reward_correctness_weight: 0.3
+    reward_speed_weight: 1.0
+    reward_length_weight: 0.0
+    reward_thinking_weight: 0.0
 
     # Test split
     test_fraction: 0.1
