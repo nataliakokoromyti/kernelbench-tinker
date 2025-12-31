@@ -76,6 +76,11 @@ app = modal.App("kernel-rl-evaluator")
     gpu="A100",
     timeout=DEFAULT_TIMEOUT,
     concurrency_limit=32,
+    retries=modal.Retries(
+        max_retries=3,
+        backoff_coefficient=2.0,
+        initial_delay=1.0,
+    ),
     keep_warm=0,
 )
 class KernelEvaluator:
@@ -114,6 +119,25 @@ class KernelEvaluator:
         """
         from kernelbench.eval import eval_kernel_against_ref, get_torch_dtype_from_string
         from kernelbench.utils import set_gpu_arch
+        import torch
+        import time
+        import modal.experimental
+
+        max_wait_time = 30
+        start_time = time.time()
+        gpu_available = False
+
+        while time.time() - start_time < max_wait_time:
+            if torch.cuda.is_available():
+                gpu_available = True
+                break
+            wait_time = min(0.5 * (2 ** int((time.time() - start_time) / 2)), 8.0)
+            time.sleep(wait_time)
+
+        if not gpu_available:
+            raise RuntimeError(
+                f"GPU not attached to container after {max_wait_time}s - Modal will retry with new container"
+            )
 
         # Set GPU architecture for Triton/CUDA compilation
         set_gpu_arch(gpu_arch)
@@ -124,14 +148,15 @@ class KernelEvaluator:
                 custom_model_src=kernel_code,
                 measure_performance=measure_performance,
                 verbose=False,
-            num_correct_trials=num_correct_trials,
-            num_perf_trials=num_perf_trials,
-            backend=backend,
-            precision=get_torch_dtype_from_string(precision),
-            timing_method=timing_method,
-            check_for_excessive_speedup=check_for_excessive_speedup,
-            excessive_speedup_threshold=excessive_speedup_threshold,
-        )
+                num_correct_trials=num_correct_trials,
+                num_perf_trials=num_perf_trials,
+                backend=backend,
+                precision=get_torch_dtype_from_string(precision),
+                timing_method=timing_method,
+                check_for_excessive_speedup=check_for_excessive_speedup,
+                excessive_speedup_threshold=excessive_speedup_threshold,
+            )
+            torch.cuda.empty_cache()
 
             if result is None:
                 return {
@@ -193,6 +218,22 @@ class KernelEvaluator:
                 "metadata": dict(result.metadata),
             }
 
+        except (torch.cuda.CudaError, torch.AcceleratorError) as e:
+            modal.experimental.stop_fetching_inputs()
+            return {
+                "format_ok": True,
+                "compiled": False,
+                "correctness": False,
+                "tests_passed": 0,
+                "tests_total": num_correct_trials,
+                "speedup": None,
+                "runtime_ms": None,
+                "baseline_runtime_ms": None,
+                "cheated": False,
+                "error_message": f"Modal evaluation failed: {str(e)}",
+                "code_length": len(kernel_code),
+                "metadata": {"gpu_error": type(e).__name__, "error_message": str(e)[:500]},
+            }
         except Exception as e:
             return {
                 "format_ok": True,
