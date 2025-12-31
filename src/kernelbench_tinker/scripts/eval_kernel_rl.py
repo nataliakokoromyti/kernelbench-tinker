@@ -70,6 +70,10 @@ class EvalConfig:
     # Evaluation settings
     num_correct_trials: int = 5
     measure_performance: bool = True
+    timing_method: str = "cuda_event"
+    precision: str = "fp32"
+    check_for_excessive_speedup: bool = True
+    excessive_speedup_threshold: float = 10.0
 
     # Output
     output_path: str = "./eval_results.json"
@@ -156,6 +160,10 @@ async def evaluate_problem(
             dataset_src=problem.dataset_src,
             num_correct_trials=cfg.num_correct_trials,
             measure_performance=cfg.measure_performance,
+            timing_method=cfg.timing_method,
+            precision=cfg.precision,
+            check_for_excessive_speedup=cfg.check_for_excessive_speedup,
+            excessive_speedup_threshold=cfg.excessive_speedup_threshold,
         )
 
         samples.append({

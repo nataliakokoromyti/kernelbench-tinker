@@ -70,6 +70,10 @@ dataset_builder:
     # Evaluation configuration
     num_correct_trials: 5
     measure_performance: true
+    timing_method: "cuda_event"
+    precision: "fp32"
+    check_for_excessive_speedup: true
+    excessive_speedup_threshold: 10.0
 
     # Reward configuration
     reward_format_weight: 0.0

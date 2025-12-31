@@ -92,6 +92,9 @@ class KernelEvaluator:
         num_perf_trials: int,
         gpu_arch: list[str],
         precision: str,
+        timing_method: str,
+        check_for_excessive_speedup: bool,
+        excessive_speedup_threshold: float,
     ) -> dict[str, Any]:
         """
         Evaluate a single kernel in an isolated Modal container.
@@ -109,8 +112,8 @@ class KernelEvaluator:
         Returns:
             Dict matching KernelEvalResult structure
         """
-        from src.eval import eval_kernel_against_ref, get_torch_dtype_from_string
-        from src.utils import set_gpu_arch
+        from kernelbench.eval import eval_kernel_against_ref, get_torch_dtype_from_string
+        from kernelbench.utils import set_gpu_arch
 
         # Set GPU architecture for Triton/CUDA compilation
         set_gpu_arch(gpu_arch)
@@ -121,11 +124,14 @@ class KernelEvaluator:
                 custom_model_src=kernel_code,
                 measure_performance=measure_performance,
                 verbose=False,
-                num_correct_trials=num_correct_trials,
-                num_perf_trials=num_perf_trials,
-                backend=backend,
-                precision=get_torch_dtype_from_string(precision),
-            )
+            num_correct_trials=num_correct_trials,
+            num_perf_trials=num_perf_trials,
+            backend=backend,
+            precision=get_torch_dtype_from_string(precision),
+            timing_method=timing_method,
+            check_for_excessive_speedup=check_for_excessive_speedup,
+            excessive_speedup_threshold=excessive_speedup_threshold,
+        )
 
             if result is None:
                 return {

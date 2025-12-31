@@ -121,17 +121,25 @@ class KernelEvalResult(TypedDict):
 
 def _ensure_kernelbench_imported() -> None:
     """Ensure KernelBench modules are importable."""
-    kernelbench_root = os.environ.get("KERNELBENCH_ROOT", "/workspace/KernelBench")
+    kernelbench_root = os.environ.get("KERNELBENCH_ROOT", "/workspace/kernel_dev/KernelBench")
+    if os.path.exists(kernelbench_root):
+        kernelbench_src = os.path.join(kernelbench_root, "src")
+        if os.path.isdir(kernelbench_src) and kernelbench_src not in sys.path:
+            sys.path.insert(0, kernelbench_src)
+        elif kernelbench_root not in sys.path:
+            sys.path.insert(0, kernelbench_root)
+
+    try:
+        import kernelbench  # noqa: F401
+        return
+    except Exception:
+        pass
 
     if not os.path.exists(kernelbench_root):
         raise RuntimeError(
             f"KernelBench not found at {kernelbench_root}. "
-            "Set KERNELBENCH_ROOT environment variable or clone to /workspace/KernelBench"
+            "Set KERNELBENCH_ROOT environment variable or clone to /workspace/kernel_dev/KernelBench"
         )
-
-    # Add KernelBench to path if not already there
-    if kernelbench_root not in sys.path:
-        sys.path.insert(0, kernelbench_root)
 
 
 def extract_code_block(text: str, languages: list[str] | None = None) -> str | None:
@@ -291,8 +299,8 @@ def get_reference_code(level: int, problem_id: int, dataset_src: str = "huggingf
         return problem_row["code"][0]
     else:
         _ensure_kernelbench_imported()
-        from src.dataset import construct_kernelbench_dataset
-        from src.utils import read_file
+        from kernelbench.dataset import construct_kernelbench_dataset
+        from kernelbench.utils import read_file
 
         dataset = construct_kernelbench_dataset(level)
         # problem_id is 1-indexed, dataset is 0-indexed
@@ -326,7 +334,7 @@ def get_prompt_for_problem(
     ref_code = get_reference_code(level, problem_id, dataset_src)
 
     _ensure_kernelbench_imported()
-    from src.prompt_constructor_toml import get_prompt_for_backend
+    from kernelbench.prompt_constructor_toml import get_prompt_for_backend
 
     prompt = get_prompt_for_backend(
         ref_code,
@@ -348,6 +356,10 @@ def evaluate_kernel(
     num_correct_trials: int = 5,
     measure_performance: bool = False,
     num_perf_trials: int = 100,
+    timing_method: str = "cuda_event",
+    precision: str = "fp32",
+    check_for_excessive_speedup: bool = True,
+    excessive_speedup_threshold: float = 10.0,
     device: torch.device | None = None,
     timeout: float = 180.0,
 ) -> KernelEvalResult:
@@ -420,7 +432,7 @@ def evaluate_kernel(
             return default_result
 
     # Import evaluation function
-    from src.eval import eval_kernel_against_ref, get_torch_dtype_from_string
+    from kernelbench.eval import eval_kernel_against_ref, get_torch_dtype_from_string
 
     try:
         result = eval_kernel_against_ref(
@@ -433,7 +445,10 @@ def evaluate_kernel(
             build_dir=None,
             device=device,
             backend=backend,
-            precision=get_torch_dtype_from_string("fp32"),
+            precision=get_torch_dtype_from_string(precision),
+            timing_method=timing_method,
+            check_for_excessive_speedup=check_for_excessive_speedup,
+            excessive_speedup_threshold=excessive_speedup_threshold,
         )
 
         if result is None:
@@ -502,6 +517,10 @@ async def evaluate_kernel_async(
     num_correct_trials: int = 5,
     measure_performance: bool = False,
     num_perf_trials: int = 100,
+    timing_method: str = "cuda_event",
+    precision: str = "fp32",
+    check_for_excessive_speedup: bool = True,
+    excessive_speedup_threshold: float = 10.0,
     timeout: float = 120.0,
     cache_results: bool = True,
 ) -> KernelEvalResult:
@@ -627,7 +646,10 @@ async def evaluate_kernel_async(
             num_correct_trials=num_correct_trials,
             measure_performance=measure_performance,
             num_perf_trials=num_perf_trials,
-            precision="fp32",
+            timing_method=timing_method,
+            precision=precision,
+            check_for_excessive_speedup=check_for_excessive_speedup,
+            excessive_speedup_threshold=excessive_speedup_threshold,
         )
 
         # Add cheating flag (checked locally, not on Modal)
@@ -768,7 +790,10 @@ async def evaluate_kernel_batch_async(
             "num_correct_trials": e.get("num_correct_trials", 5),
             "measure_performance": e.get("measure_performance", False),
             "num_perf_trials": e.get("num_perf_trials", 100),
-            "precision": "fp32",
+            "timing_method": e.get("timing_method", "cuda_event"),
+            "precision": e.get("precision", "fp32"),
+            "check_for_excessive_speedup": e.get("check_for_excessive_speedup", True),
+            "excessive_speedup_threshold": e.get("excessive_speedup_threshold", 10.0),
             "cheated": cheated,
         })
 
@@ -815,7 +840,7 @@ def get_problem_count(level: int, dataset_src: str = "huggingface") -> int:
         return len(level_data)
     else:
         _ensure_kernelbench_imported()
-        from src.dataset import construct_kernelbench_dataset
+        from kernelbench.dataset import construct_kernelbench_dataset
         return len(construct_kernelbench_dataset(level))
 
 

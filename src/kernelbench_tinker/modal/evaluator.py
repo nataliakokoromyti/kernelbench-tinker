@@ -140,6 +140,9 @@ class ModalKernelEvaluator:
         measure_performance: bool = False,
         num_perf_trials: int = 100,
         precision: str = "fp32",
+        timing_method: str = "cuda_event",
+        check_for_excessive_speedup: bool = True,
+        excessive_speedup_threshold: float = 10.0,
     ) -> dict[str, Any]:
         """
         Evaluate a single kernel using Modal.
@@ -179,6 +182,9 @@ class ModalKernelEvaluator:
             measure_performance,
             num_perf_trials,
             precision,
+            timing_method,
+            check_for_excessive_speedup,
+            excessive_speedup_threshold,
         )
         return result
 
@@ -191,6 +197,9 @@ class ModalKernelEvaluator:
         measure_performance: bool,
         num_perf_trials: int,
         precision: str,
+        timing_method: str,
+        check_for_excessive_speedup: bool,
+        excessive_speedup_threshold: float,
     ) -> dict[str, Any]:
         """Synchronous single kernel evaluation using deployed Modal app."""
         evaluator_cls = self._get_deployed_evaluator()
@@ -208,6 +217,9 @@ class ModalKernelEvaluator:
             num_perf_trials=num_perf_trials,
             gpu_arch=self._gpu_arch,
             precision=precision,
+            timing_method=timing_method,
+            check_for_excessive_speedup=check_for_excessive_speedup,
+            excessive_speedup_threshold=excessive_speedup_threshold,
         )
 
         return result
@@ -265,7 +277,8 @@ class ModalKernelEvaluator:
 
         # Prepare arguments for starmap
         # Each tuple is (ref_code, kernel_code, backend, num_correct_trials,
-        #                measure_performance, num_perf_trials, gpu_arch, precision)
+        #                measure_performance, num_perf_trials, gpu_arch, precision,
+        #                timing_method, check_for_excessive_speedup, excessive_speedup_threshold)
         args = [
             (
                 e["ref_code"],
@@ -276,6 +289,9 @@ class ModalKernelEvaluator:
                 e.get("num_perf_trials", 100),
                 self._gpu_arch,
                 e.get("precision", "fp32"),
+                e.get("timing_method", "cuda_event"),
+                e.get("check_for_excessive_speedup", True),
+                e.get("excessive_speedup_threshold", 10.0),
             )
             for e in evaluations
         ]
@@ -328,6 +344,9 @@ class ModalKernelEvaluator:
         measure_performance: bool = False,
         num_perf_trials: int = 100,
         precision: str = "fp32",
+        timing_method: str = "cuda_event",
+        check_for_excessive_speedup: bool = True,
+        excessive_speedup_threshold: float = 10.0,
     ) -> dict[str, Any]:
         """
         Coalesce multiple single-eval requests into Modal batch calls.
@@ -358,6 +377,9 @@ class ModalKernelEvaluator:
             "measure_performance": measure_performance,
             "num_perf_trials": num_perf_trials,
             "precision": precision,
+            "timing_method": timing_method,
+            "check_for_excessive_speedup": check_for_excessive_speedup,
+            "excessive_speedup_threshold": excessive_speedup_threshold,
         }
         return await self._batcher.submit(request)
 

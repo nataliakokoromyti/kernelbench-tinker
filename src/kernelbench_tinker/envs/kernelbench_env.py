@@ -94,6 +94,10 @@ class KernelBenchEnv(Env):
         system_prompt: str | None = None,
         num_correct_trials: int = 5,
         measure_performance: bool = False,
+        timing_method: str = "cuda_event",
+        precision: str = "fp32",
+        check_for_excessive_speedup: bool = True,
+        excessive_speedup_threshold: float = 10.0,
         use_modal: bool = True,
         modal_timeout: float = 120.0,
     ):
@@ -116,6 +120,10 @@ class KernelBenchEnv(Env):
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.num_correct_trials = num_correct_trials
         self.measure_performance = measure_performance
+        self.timing_method = timing_method
+        self.precision = precision
+        self.check_for_excessive_speedup = check_for_excessive_speedup
+        self.excessive_speedup_threshold = excessive_speedup_threshold
         self.use_modal = use_modal
         self.modal_timeout = modal_timeout
 
@@ -193,6 +201,10 @@ class KernelBenchEnv(Env):
                 dataset_src=self.problem.dataset_src,
                 num_correct_trials=self.num_correct_trials,
                 measure_performance=self.measure_performance,
+                timing_method=self.timing_method,
+                precision=self.precision,
+                check_for_excessive_speedup=self.check_for_excessive_speedup,
+                excessive_speedup_threshold=self.excessive_speedup_threshold,
                 timeout=self.modal_timeout,
             )
         else:
@@ -205,6 +217,10 @@ class KernelBenchEnv(Env):
                 dataset_src=self.problem.dataset_src,
                 num_correct_trials=self.num_correct_trials,
                 measure_performance=self.measure_performance,
+                timing_method=self.timing_method,
+                precision=self.precision,
+                check_for_excessive_speedup=self.check_for_excessive_speedup,
+                excessive_speedup_threshold=self.excessive_speedup_threshold,
             )
         self._last_result = eval_result
         eval_time = time.perf_counter() - eval_start
@@ -326,6 +342,14 @@ class KernelBenchEnvGroupBuilder(EnvGroupBuilder):
     system_prompt: str | None = None
     num_correct_trials: int = 5
     measure_performance: bool = False
+    timing_method: str = "cuda_event"
+    precision: str = "fp32"
+    check_for_excessive_speedup: bool = True
+    excessive_speedup_threshold: float = 10.0
+    timing_method: str = "cuda_event"
+    precision: str = "fp32"
+    check_for_excessive_speedup: bool = True
+    excessive_speedup_threshold: float = 10.0
     use_modal: bool = True
     modal_timeout: float = 120.0
 
@@ -339,6 +363,10 @@ class KernelBenchEnvGroupBuilder(EnvGroupBuilder):
                 system_prompt=self.system_prompt,
                 num_correct_trials=self.num_correct_trials,
                 measure_performance=self.measure_performance,
+                timing_method=self.timing_method,
+                precision=self.precision,
+                check_for_excessive_speedup=self.check_for_excessive_speedup,
+                excessive_speedup_threshold=self.excessive_speedup_threshold,
                 use_modal=self.use_modal,
                 modal_timeout=self.modal_timeout,
             )
@@ -383,6 +411,10 @@ class KernelBenchRLDataset(RLDataset):
         system_prompt: str | None = None,
         num_correct_trials: int = 5,
         measure_performance: bool = False,
+        timing_method: str = "cuda_event",
+        precision: str = "fp32",
+        check_for_excessive_speedup: bool = True,
+        excessive_speedup_threshold: float = 10.0,
         shuffle: bool = True,
         num_epochs: int = 1,
         use_modal: bool = True,
@@ -413,6 +445,10 @@ class KernelBenchRLDataset(RLDataset):
         self.system_prompt = system_prompt
         self.num_correct_trials = num_correct_trials
         self.measure_performance = measure_performance
+        self.timing_method = timing_method
+        self.precision = precision
+        self.check_for_excessive_speedup = check_for_excessive_speedup
+        self.excessive_speedup_threshold = excessive_speedup_threshold
         self.shuffle = shuffle
         self.num_epochs = num_epochs
         self.use_modal = use_modal
@@ -457,6 +493,10 @@ class KernelBenchRLDataset(RLDataset):
                 system_prompt=self.system_prompt,
                 num_correct_trials=self.num_correct_trials,
                 measure_performance=self.measure_performance,
+                timing_method=self.timing_method,
+                precision=self.precision,
+                check_for_excessive_speedup=self.check_for_excessive_speedup,
+                excessive_speedup_threshold=self.excessive_speedup_threshold,
                 use_modal=self.use_modal,
                 modal_timeout=self.modal_timeout,
             )
@@ -580,6 +620,10 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             reward_config=reward_config,
             num_correct_trials=self.num_correct_trials,
             measure_performance=self.measure_performance,
+            timing_method=self.timing_method,
+            precision=self.precision,
+            check_for_excessive_speedup=self.check_for_excessive_speedup,
+            excessive_speedup_threshold=self.excessive_speedup_threshold,
             shuffle=self.shuffle,
             num_epochs=self.num_epochs,
             use_modal=self.use_modal,
@@ -597,6 +641,10 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
                 reward_config=reward_config,
                 num_correct_trials=self.num_correct_trials,
                 measure_performance=self.measure_performance,
+                timing_method=self.timing_method,
+                precision=self.precision,
+                check_for_excessive_speedup=self.check_for_excessive_speedup,
+                excessive_speedup_threshold=self.excessive_speedup_threshold,
                 shuffle=False,
                 num_epochs=1,
                 use_modal=self.use_modal,
