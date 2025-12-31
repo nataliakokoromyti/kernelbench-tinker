@@ -73,10 +73,8 @@ dataset_builder:
     num_perf_trials: 100
     timing_method: "cuda_event"
     precision: "fp32"
-    gpu_arch: null
     check_for_excessive_speedup: true
     excessive_speedup_threshold: 10.0
-    kernel_eval_build_dir: null
 
     # Reward configuration
     reward_format_weight: 0.0
@@ -101,6 +99,5 @@ dataset_builder:
     # Modal Configuration (Isolated GPU Evaluation)
     # Run each kernel in an isolated Modal container with hard timeout
     # =============================================================================
-    use_modal: true
     modal_gpu_type: "A100"
     modal_timeout: 60.0

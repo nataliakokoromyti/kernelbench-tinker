@@ -36,7 +36,6 @@ from kernelbench_tinker.envs.kernelbench_client import (
     KernelBenchProblem,
     KernelEvalResult,
     ParsedResponse,
-    evaluate_kernel,
     evaluate_kernel_async,
     get_problem_ids,
     extract_code_block,
@@ -97,11 +96,8 @@ class KernelBenchEnv(Env):
         num_perf_trials: int = 100,
         timing_method: str = "cuda_event",
         precision: str = "fp32",
-        gpu_arch: list[str] | None = None,
         check_for_excessive_speedup: bool = True,
         excessive_speedup_threshold: float = 10.0,
-        kernel_eval_build_dir: str | None = None,
-        use_modal: bool = True,
         modal_timeout: float = 120.0,
     ):
         """
@@ -114,7 +110,6 @@ class KernelBenchEnv(Env):
             system_prompt: Optional custom system prompt
             num_correct_trials: Number of correctness trials for evaluation
             measure_performance: Whether to measure kernel runtime
-            use_modal: Whether to use Modal for isolated GPU evaluation
             modal_timeout: Timeout in seconds for Modal evaluation
         """
         self.problem = problem
@@ -126,11 +121,8 @@ class KernelBenchEnv(Env):
         self.num_perf_trials = num_perf_trials
         self.timing_method = timing_method
         self.precision = precision
-        self.gpu_arch = gpu_arch
         self.check_for_excessive_speedup = check_for_excessive_speedup
         self.excessive_speedup_threshold = excessive_speedup_threshold
-        self.kernel_eval_build_dir = kernel_eval_build_dir
-        self.use_modal = use_modal
         self.modal_timeout = modal_timeout
 
         # State for multi-turn (future)
@@ -196,42 +188,23 @@ class KernelBenchEnv(Env):
         # Check format validity
         format_ok = parsed.format_ok
 
-        # Evaluate the kernel (using Modal for isolation if enabled)
+        # Evaluate the kernel (Modal for isolated GPU execution)
         eval_start = time.perf_counter()
-        if self.use_modal:
-            eval_result = await evaluate_kernel_async(
-                level=self.problem.level,
-                problem_id=self.problem.problem_id,
-                backend=self.problem.backend,
-                kernel_code=kernel_code,
-                dataset_src=self.problem.dataset_src,
-                num_correct_trials=self.num_correct_trials,
-                measure_performance=self.measure_performance,
-                num_perf_trials=self.num_perf_trials,
-                timing_method=self.timing_method,
-                precision=self.precision,
-                check_for_excessive_speedup=self.check_for_excessive_speedup,
-                excessive_speedup_threshold=self.excessive_speedup_threshold,
-                timeout=self.modal_timeout,
-            )
-        else:
-            # Local evaluation (no isolation - use with caution)
-            eval_result = evaluate_kernel(
-                level=self.problem.level,
-                problem_id=self.problem.problem_id,
-                backend=self.problem.backend,
-                kernel_code=kernel_code,
-                dataset_src=self.problem.dataset_src,
-                num_correct_trials=self.num_correct_trials,
-                measure_performance=self.measure_performance,
-                num_perf_trials=self.num_perf_trials,
-                timing_method=self.timing_method,
-                precision=self.precision,
-                gpu_arch=self.gpu_arch,
-                check_for_excessive_speedup=self.check_for_excessive_speedup,
-                excessive_speedup_threshold=self.excessive_speedup_threshold,
-                build_dir_base=self.kernel_eval_build_dir,
-            )
+        eval_result = await evaluate_kernel_async(
+            level=self.problem.level,
+            problem_id=self.problem.problem_id,
+            backend=self.problem.backend,
+            kernel_code=kernel_code,
+            dataset_src=self.problem.dataset_src,
+            num_correct_trials=self.num_correct_trials,
+            measure_performance=self.measure_performance,
+            num_perf_trials=self.num_perf_trials,
+            timing_method=self.timing_method,
+            precision=self.precision,
+            check_for_excessive_speedup=self.check_for_excessive_speedup,
+            excessive_speedup_threshold=self.excessive_speedup_threshold,
+            timeout=self.modal_timeout,
+        )
         self._last_result = eval_result
         eval_time = time.perf_counter() - eval_start
 
@@ -354,11 +327,8 @@ class KernelBenchEnvGroupBuilder(EnvGroupBuilder):
     num_perf_trials: int = 100
     timing_method: str = "cuda_event"
     precision: str = "fp32"
-    gpu_arch: list[str] | None = None
     check_for_excessive_speedup: bool = True
     excessive_speedup_threshold: float = 10.0
-    kernel_eval_build_dir: str | None = None
-    use_modal: bool = True
     modal_timeout: float = 120.0
 
     async def make_envs(self) -> Sequence[Env]:
@@ -374,11 +344,8 @@ class KernelBenchEnvGroupBuilder(EnvGroupBuilder):
                 num_perf_trials=self.num_perf_trials,
                 timing_method=self.timing_method,
                 precision=self.precision,
-                gpu_arch=self.gpu_arch,
                 check_for_excessive_speedup=self.check_for_excessive_speedup,
                 excessive_speedup_threshold=self.excessive_speedup_threshold,
-                kernel_eval_build_dir=self.kernel_eval_build_dir,
-                use_modal=self.use_modal,
                 modal_timeout=self.modal_timeout,
             )
             for _ in range(self.group_size)
@@ -425,13 +392,10 @@ class KernelBenchRLDataset(RLDataset):
         num_perf_trials: int = 100,
         timing_method: str = "cuda_event",
         precision: str = "fp32",
-        gpu_arch: list[str] | None = None,
         check_for_excessive_speedup: bool = True,
         excessive_speedup_threshold: float = 10.0,
-        kernel_eval_build_dir: str | None = None,
         shuffle: bool = True,
         num_epochs: int = 1,
-        use_modal: bool = True,
         modal_timeout: float = 180.0,
     ):
         """
@@ -448,7 +412,6 @@ class KernelBenchRLDataset(RLDataset):
             measure_performance: Whether to measure runtime
             shuffle: Whether to shuffle problems each epoch
             num_epochs: Number of training epochs
-            use_modal: Whether to use Modal for isolated GPU evaluation
             modal_timeout: Timeout in seconds for Modal evaluation
         """
         self.problems = problems
@@ -462,13 +425,10 @@ class KernelBenchRLDataset(RLDataset):
         self.num_perf_trials = num_perf_trials
         self.timing_method = timing_method
         self.precision = precision
-        self.gpu_arch = gpu_arch
         self.check_for_excessive_speedup = check_for_excessive_speedup
         self.excessive_speedup_threshold = excessive_speedup_threshold
-        self.kernel_eval_build_dir = kernel_eval_build_dir
         self.shuffle = shuffle
         self.num_epochs = num_epochs
-        self.use_modal = use_modal
         self.modal_timeout = modal_timeout
 
         # Create shuffled indices for each epoch
@@ -513,11 +473,8 @@ class KernelBenchRLDataset(RLDataset):
                 num_perf_trials=self.num_perf_trials,
                 timing_method=self.timing_method,
                 precision=self.precision,
-                gpu_arch=self.gpu_arch,
                 check_for_excessive_speedup=self.check_for_excessive_speedup,
                 excessive_speedup_threshold=self.excessive_speedup_threshold,
-                kernel_eval_build_dir=self.kernel_eval_build_dir,
-                use_modal=self.use_modal,
                 modal_timeout=self.modal_timeout,
             )
             builders.append(builder)
@@ -551,12 +508,10 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     num_correct_trials: int = 5
     measure_performance: bool = False
     num_perf_trials: int = 100
-    gpu_arch: list[str] | None = None
     timing_method: str = "cuda_event"
     precision: str = "fp32"
     check_for_excessive_speedup: bool = True
     excessive_speedup_threshold: float = 10.0
-    kernel_eval_build_dir: str | None = None
 
     # Reward configuration
     reward_format_weight: float = 0.1
@@ -578,7 +533,6 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     prompt_gpu_name: str | None = None
 
     # Modal configuration (isolated GPU evaluation)
-    use_modal: bool = True  # Use Modal for isolated evaluation
     modal_gpu_type: str = "A100"  # GPU type to use on Modal
     modal_timeout: float = 120.0  # Timeout in seconds per kernel
 
@@ -635,16 +589,15 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             length_weight=self.reward_length_weight,
         )
 
-        # Configure Modal evaluator if enabled
-        if self.use_modal:
-            from kernelbench_tinker.modal.evaluator import ModalEvaluatorConfig, set_modal_evaluator, ModalKernelEvaluator
-            modal_config = ModalEvaluatorConfig(
-                enabled=True,
-                gpu_type=self.modal_gpu_type,
-                timeout=int(self.modal_timeout),
-            )
-            set_modal_evaluator(ModalKernelEvaluator(modal_config))
-            logger.info(f"Modal evaluator configured: GPU={self.modal_gpu_type}, timeout={self.modal_timeout}s")
+        # Configure Modal evaluator
+        from kernelbench_tinker.modal.evaluator import ModalEvaluatorConfig, set_modal_evaluator, ModalKernelEvaluator
+        modal_config = ModalEvaluatorConfig(
+            enabled=True,
+            gpu_type=self.modal_gpu_type,
+            timeout=int(self.modal_timeout),
+        )
+        set_modal_evaluator(ModalKernelEvaluator(modal_config))
+        logger.info(f"Modal evaluator configured: GPU={self.modal_gpu_type}, timeout={self.modal_timeout}s")
 
         # Create train dataset
         train_dataset = KernelBenchRLDataset(
@@ -658,13 +611,10 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             num_perf_trials=self.num_perf_trials,
             timing_method=self.timing_method,
             precision=self.precision,
-            gpu_arch=self.gpu_arch,
             check_for_excessive_speedup=self.check_for_excessive_speedup,
             excessive_speedup_threshold=self.excessive_speedup_threshold,
-            kernel_eval_build_dir=self.kernel_eval_build_dir,
             shuffle=self.shuffle,
             num_epochs=self.num_epochs,
-            use_modal=self.use_modal,
             modal_timeout=self.modal_timeout,
         )
 
@@ -682,13 +632,10 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
                 num_perf_trials=self.num_perf_trials,
                 timing_method=self.timing_method,
                 precision=self.precision,
-                gpu_arch=self.gpu_arch,
                 check_for_excessive_speedup=self.check_for_excessive_speedup,
                 excessive_speedup_threshold=self.excessive_speedup_threshold,
-                kernel_eval_build_dir=self.kernel_eval_build_dir,
                 shuffle=False,
                 num_epochs=1,
-                use_modal=self.use_modal,
                 modal_timeout=self.modal_timeout,
             )
 

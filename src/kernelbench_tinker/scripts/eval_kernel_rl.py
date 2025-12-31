@@ -33,7 +33,7 @@ from tinker_cookbook.completers import TinkerTokenCompleter
 from kernelbench_tinker.env import setup_environment
 from kernelbench_tinker.envs.kernelbench_client import (
     KernelBenchProblem,
-    evaluate_kernel,
+    evaluate_kernel_async,
     get_problem_ids,
     parse_structured_response,
 )
@@ -73,9 +73,12 @@ class EvalConfig:
     num_perf_trials: int = 100
     timing_method: str = "cuda_event"
     precision: str = "fp32"
-    gpu_arch: list[str] | None = None
     check_for_excessive_speedup: bool = True
     excessive_speedup_threshold: float = 10.0
+
+    # Modal configuration
+    modal_gpu_type: str = "A100"
+    modal_timeout: float = 120.0
 
     # Prompt configuration
     prompt_option: str = "one_shot"
@@ -159,7 +162,7 @@ async def evaluate_problem(
         )
 
         # Evaluate
-        eval_result = evaluate_kernel(
+        eval_result = await evaluate_kernel_async(
             level=problem.level,
             problem_id=problem.problem_id,
             backend=problem.backend,
@@ -170,9 +173,9 @@ async def evaluate_problem(
             num_perf_trials=cfg.num_perf_trials,
             timing_method=cfg.timing_method,
             precision=cfg.precision,
-            gpu_arch=cfg.gpu_arch,
             check_for_excessive_speedup=cfg.check_for_excessive_speedup,
             excessive_speedup_threshold=cfg.excessive_speedup_threshold,
+            timeout=cfg.modal_timeout,
         )
 
         samples.append({
@@ -203,6 +206,19 @@ async def evaluate_problem(
 
 async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
     """Run full evaluation."""
+    from kernelbench_tinker.modal.evaluator import (
+        ModalEvaluatorConfig,
+        ModalKernelEvaluator,
+        set_modal_evaluator,
+    )
+
+    modal_config = ModalEvaluatorConfig(
+        enabled=True,
+        gpu_type=cfg.modal_gpu_type,
+        timeout=int(cfg.modal_timeout),
+    )
+    set_modal_evaluator(ModalKernelEvaluator(modal_config))
+
     # Create Tinker client
     service_client = tinker.ServiceClient(base_url=cfg.base_url)
 
