@@ -26,7 +26,7 @@ classifiers = [
 dependencies = [
     "tinker",
     "tinker-cookbook",
-    "src",  # KernelBench package
+    "src",  # KernelBench package name (module import is kernelbench.*)
     "torch>=2.0.0",
     "numpy",
     "pyyaml",

@@ -160,7 +160,6 @@ async def _run() -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
-if __name__ == "__main__":
 def main() -> None:
     asyncio.run(_run())
 

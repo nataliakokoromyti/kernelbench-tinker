@@ -552,6 +552,11 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     measure_performance: bool = False
     num_perf_trials: int = 100
     gpu_arch: list[str] | None = None
+    timing_method: str = "cuda_event"
+    precision: str = "fp32"
+    check_for_excessive_speedup: bool = True
+    excessive_speedup_threshold: float = 10.0
+    kernel_eval_build_dir: str | None = None
 
     # Reward configuration
     reward_format_weight: float = 0.1
