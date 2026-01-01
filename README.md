@@ -1,6 +1,6 @@
  # KernelBench ↔ Tinker Integration
 
-An end‑to‑end integration that lets [Tinker](https://tinker-docs.thinkingmachines.ai/) train models against [KernelBench](https://github.com/ScalingIntelligence/KernelBench) by generating kernels, evaluating them (Modal or local), and turning
+An end‑to‑end integration that lets [Tinker](https://tinker-docs.thinkingmachines.ai/) train models against [KernelBench](https://github.com/ScalingIntelligence/KernelBench) by generating kernels, evaluating them on Modal, and turning
 those results into RL rewards.
 
 ## Overview
@@ -9,7 +9,7 @@ those results into RL rewards.
 
   - Uses **KernelBench** for prompts and kernel evaluation (compile/correctness/speed)
   - Uses **Tinker** for distributed LoRA fine-tuning with GRPO-style RL
-  - Runs evaluations locally or through Modal for isolated executions
+  - Runs evaluations through Modal for isolated executions
   - Computes rewards directly from KernelBench evaluation results
 
 ## Quick Start
@@ -38,11 +38,9 @@ just resume run=my_experiment
 
 ## Setup
 
-### 1. Clone repositories
+### 1. Clone repository
 ```bash
 cd /workspace/kernel_dev
-git clone https://github.com/ScalingIntelligence/KernelBench.git
-git clone https://github.com/thinking-machines-lab/tinker-cookbook.git
 git clone https://github.com/nataliakokoromyti/kernelbench-tinker.git
 ```
 
@@ -79,7 +77,7 @@ The `.env` file is automatically loaded when running scripts.
 
 This repo wires Tinker RL to KernelBench evaluation. The training loop:
 - Samples kernels from the model according to KernelBench problems
-- Evaluates them with KernelBench (locally or via Modal using KB's eval harness)
+- Evaluates them with KernelBench via Modal using KB's eval harness
 - Converts results into rewards and updates the model with GRPO‑style RL
 - Saves checkpoints after every batch for crash recovery
   
@@ -142,6 +140,8 @@ Then open http://localhost:6006 in your browser.
 
 ## Evaluation
 
+Requires the Modal app to be deployed and Modal tokens configured.
+
 ### Evaluate a Checkpoint
 
 ```bash
@@ -165,10 +165,9 @@ uv run python -m kernelbench_tinker.scripts.eval_kernel_rl \
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TINKER_API_KEY` | Yes | API key from https://console.tinker.thinkingmachines.ai |
-| KERNELBENCH_ROOT` | No | Path to KernelBench repo (auto-detected) |
-| `MODAL_TOKEN_ID` | Yes (if using Modal) | Modal token ID |
-| `MODAL_TOKEN_SECRET` | Yes (if using Modal) | Modal token secret |
-| `CUDA_VISIBLE_DEVICES` | No | GPU selection (default: all available) |
+| `KERNELBENCH_ROOT` | No | Optional local KernelBench override |
+| `MODAL_TOKEN_ID` | Yes | Modal token ID |
+| `MODAL_TOKEN_SECRET` | Yes | Modal token secret |
 
 ## Architecture
 
@@ -214,12 +213,6 @@ just resume my_experiment
 Reduce `batch_size` or `group_size`:
 ```bash
 batch_size=2 group_size=2
-```
-
-### KernelBench import errors
-Check `KERNELBENCH_ROOT`:
-```bash
-export KERNELBENCH_ROOT=/workspace/kernel_dev/KernelBench
 ```
 
 ### Tinker API errors
