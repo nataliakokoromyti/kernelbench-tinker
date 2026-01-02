@@ -304,6 +304,7 @@ class ModalKernelEvaluator:
             evaluator.evaluate.starmap(
                 args,
                 return_exceptions=self.config.return_exceptions,
+                wrap_returned_exceptions=False,
             )
         )
 
