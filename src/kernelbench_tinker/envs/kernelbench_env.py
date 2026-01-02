@@ -41,7 +41,12 @@ from kernelbench_tinker.envs.kernelbench_client import (
     extract_code_block,
     parse_structured_response,
 )
-from kernelbench_tinker.training.reward import compute_reward, compute_reward_breakdown, RewardConfig
+from kernelbench_tinker.training.reward import (
+    compute_reward,
+    compute_reward_breakdown,
+    RewardConfig,
+    get_reward_config,
+)
 from kernelbench_tinker.training.trace_logger import get_trace_logger
 
 logger = logging.getLogger(__name__)
@@ -514,6 +519,7 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     excessive_speedup_threshold: float = 10.0
 
     # Reward configuration
+    reward_preset: str | None = None
     reward_format_weight: float = 0.1
     reward_compile_weight: float = 0.2
     reward_correctness_weight: float = 1.0
@@ -580,14 +586,17 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
         # Create renderer
         renderer = renderers.get_renderer(self.renderer_name, tokenizer)
 
-        # Create reward config
-        reward_config = RewardConfig(
-            format_weight=self.reward_format_weight,
-            compile_weight=self.reward_compile_weight,
-            correctness_weight=self.reward_correctness_weight,
-            speed_weight=self.reward_speed_weight,
-            length_weight=self.reward_length_weight,
-        )
+        # Create reward config (optional preset overrides manual weights)
+        if self.reward_preset:
+            reward_config = get_reward_config(self.reward_preset)
+        else:
+            reward_config = RewardConfig(
+                format_weight=self.reward_format_weight,
+                compile_weight=self.reward_compile_weight,
+                correctness_weight=self.reward_correctness_weight,
+                speed_weight=self.reward_speed_weight,
+                length_weight=self.reward_length_weight,
+            )
 
         # Configure Modal evaluator
         from kernelbench_tinker.modal.evaluator import ModalEvaluatorConfig, set_modal_evaluator, ModalKernelEvaluator

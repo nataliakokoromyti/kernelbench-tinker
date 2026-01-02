@@ -1,0 +1,74 @@
+# KernelBench RL Training Configuration (Stage 1: Format/Compile)
+# ==============================================================
+#
+# Use this config to get non-zero rewards early by emphasizing
+# format and compilation before correctness/speed.
+#
+# Usage:
+#   python -m kernelbench_tinker.scripts.train_kernel_rl \
+#       --config src/kernelbench_tinker/config/rl_kernelbench_stage1.yaml \
+#       log_path=./runs/my_experiment
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model_name: "Qwen/Qwen3-30B-A3B"
+lora_rank: 64
+learning_rate: 0.000002
+
+# =============================================================================
+# Generation Configuration
+# =============================================================================
+max_tokens: 4096
+temperature: 1.0
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+num_substeps: 2
+loss_fn: "importance_sampling"
+remove_constant_reward_groups: true
+
+# =============================================================================
+# Logging and Checkpointing
+# =============================================================================
+log_path: "./runs/kernelbench_tinker"
+save_every: 1
+eval_every: 10
+
+# =============================================================================
+# Dataset Configuration
+# =============================================================================
+dataset_builder:
+    level: 1
+    start_problem: null
+    end_problem: null
+    backend: "triton"
+    dataset_src: "huggingface"
+
+    batch_size: 8
+    group_size: 16
+    num_epochs: 1
+    shuffle: true
+
+    num_correct_trials: 5
+    measure_performance: false
+    num_perf_trials: 100
+    timing_method: "cuda_event"
+    precision: "fp32"
+    check_for_excessive_speedup: true
+    excessive_speedup_threshold: 10.0
+
+    # Reward preset: focuses on format/compile signal
+    reward_preset: "stage1"
+
+    test_fraction: 0.1
+    renderer_name: "qwen3_disable_thinking"
+
+    prompt_option: "one_shot"
+    prompt_precision: null
+    prompt_include_hardware: false
+    prompt_gpu_name: null
+
+    modal_gpu_type: "A100"
+    modal_timeout: 60.0
