@@ -33,7 +33,7 @@ DEFAULT_TIMEOUT = 120  # 2 minutes per kernel by default (tunable via config)
 # KernelBench install (default: pip install pinned git rev)
 KERNELBENCH_GIT_SPEC = os.environ.get(
     "KERNELBENCH_GIT_SPEC",
-    "src @ git+https://github.com/ScalingIntelligence/KernelBench.git@404ee91422cdb78646947faba2cce4c03601bc52",
+    "kernelbench @ git+https://github.com/ScalingIntelligence/KernelBench.git@06e49e8781b13acdb68b102b3c9c864bd9454db3",
 )
 
 # Optional local override for KernelBench source (useful for dev)
@@ -54,7 +54,21 @@ image = (
         "g++-10",
         "clang",
     )
-    .pip_install(KERNELBENCH_GIT_SPEC)
+    .pip_install(
+        KERNELBENCH_GIT_SPEC,
+        "python-dotenv",
+        "tqdm",
+        "openai",
+        "litellm[proxy]",
+        "requests",
+        "pydantic",
+        "numpy",
+        "torch==2.9.0",
+        "transformers",
+        "datasets",
+        "einops",
+        "packaging",
+    )
 )
 
 # Optional: overlay local KernelBench source for development
@@ -71,13 +85,13 @@ app = modal.App("kernel-rl-evaluator")
     image=image,
     gpu="A100",
     timeout=DEFAULT_TIMEOUT,
-    concurrency_limit=32,
+    max_containers=32,
     retries=modal.Retries(
         max_retries=3,
         backoff_coefficient=2.0,
         initial_delay=1.0,
     ),
-    keep_warm=0,
+    min_containers=0,
 )
 class KernelEvaluator:
     """Modal class for kernel evaluation with configurable GPU."""
@@ -113,8 +127,12 @@ class KernelEvaluator:
         Returns:
             Dict matching KernelEvalResult structure
         """
-        from kernelbench.eval import eval_kernel_against_ref, get_torch_dtype_from_string
-        from kernelbench.utils import set_gpu_arch
+        try:
+            from src.eval import eval_kernel_against_ref, get_torch_dtype_from_string
+            from src.utils import set_gpu_arch
+        except ModuleNotFoundError:
+            from kernelbench.eval import eval_kernel_against_ref, get_torch_dtype_from_string
+            from kernelbench.utils import set_gpu_arch
         import torch
         import time
         import modal.experimental
@@ -139,19 +157,32 @@ class KernelEvaluator:
         set_gpu_arch(gpu_arch)
 
         try:
-            result = eval_kernel_against_ref(
-                original_model_src=ref_code,
-                custom_model_src=kernel_code,
-                measure_performance=measure_performance,
-                verbose=False,
-                num_correct_trials=num_correct_trials,
-                num_perf_trials=num_perf_trials,
-                backend=backend,
-                precision=get_torch_dtype_from_string(precision),
-                timing_method=timing_method,
-                check_for_excessive_speedup=check_for_excessive_speedup,
-                excessive_speedup_threshold=excessive_speedup_threshold,
-            )
+            eval_kwargs = {
+                "original_model_src": ref_code,
+                "custom_model_src": kernel_code,
+                "measure_performance": measure_performance,
+                "verbose": False,
+                "num_correct_trials": num_correct_trials,
+                "num_perf_trials": num_perf_trials,
+                "backend": backend,
+                "precision": get_torch_dtype_from_string(precision),
+                "timing_method": timing_method,
+                "check_for_excessive_speedup": check_for_excessive_speedup,
+                "excessive_speedup_threshold": excessive_speedup_threshold,
+            }
+            try:
+                result = eval_kernel_against_ref(**eval_kwargs)
+            except TypeError as exc:
+                msg = str(exc)
+                if "timing_method" in msg:
+                    eval_kwargs.pop("timing_method", None)
+                if "check_for_excessive_speedup" in msg:
+                    eval_kwargs.pop("check_for_excessive_speedup", None)
+                if "excessive_speedup_threshold" in msg:
+                    eval_kwargs.pop("excessive_speedup_threshold", None)
+                if msg == str(exc) and "timing_method" not in msg and "check_for_excessive_speedup" not in msg and "excessive_speedup_threshold" not in msg:
+                    raise
+                result = eval_kernel_against_ref(**eval_kwargs)
             torch.cuda.empty_cache()
 
             if result is None:
