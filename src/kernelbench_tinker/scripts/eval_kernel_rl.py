@@ -18,26 +18,55 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import chz
 import tinker
-from tqdm import tqdm
-
 from tinker_cookbook import renderers, tokenizer_utils
 from tinker_cookbook.completers import TinkerTokenCompleter
+from tqdm import tqdm
 
 from kernelbench_tinker.env import setup_environment
+from kernelbench_tinker.envs.env_utils import build_system_prompt
 from kernelbench_tinker.envs.kernelbench_client import (
     KernelBenchProblem,
     evaluate_kernel_async,
     get_problem_ids,
     parse_structured_response,
 )
-from kernelbench_tinker.training.models import get_renderer_name_for_model
+from kernelbench_tinker.training.models import (
+    KernelBenchTokenCompleter,
+    get_renderer_name_for_model,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def pick_best_sample(
+    samples: list[dict[str, Any]],
+) -> tuple[bool, bool, float | None]:
+    """Pick the best sample from a list of evaluation results.
+
+    Returns (best_correct, best_compiled, best_speedup).
+    """
+    def speedup_value(sample: dict[str, Any]) -> float:
+        speedup = sample.get("speedup")
+        return float(speedup) if isinstance(speedup, (int, float)) else 0.0
+
+    correct_samples = [s for s in samples if s.get("correctness")]
+    if correct_samples:
+        best = max(correct_samples, key=speedup_value)
+    else:
+        compiled = [s for s in samples if s.get("compiled")]
+        best = compiled[0] if compiled else samples[0]
+
+    best_speedup: float | None = None
+    speedup_obj = best.get("speedup")
+    if isinstance(speedup_obj, (int, float)):
+        best_speedup = float(speedup_obj)
+
+    return bool(best.get("correctness")), bool(best.get("compiled")), best_speedup
 
 
 @chz.chz
@@ -58,6 +87,8 @@ class EvalConfig:
     # Generation configuration
     max_tokens: int = 4096
     temperature: float = 0.0  # Greedy for eval
+    top_p: float = 1.0  # Nucleus sampling (1.0 = disabled)
+    seed: int | None = None  # Random seed for generation (null = random)
     num_samples: int = 1  # Samples per problem
 
     # Evaluation settings
@@ -86,6 +117,12 @@ class EvalConfig:
     tensorboard_log_dir: str | None = None  # If provided, log eval metrics to TensorBoard
     tensorboard_step: int = 0  # Step to log eval metrics at
 
+    # Multi-turn inference
+    multiturn_enabled: bool = False
+    multiturn_max_turns: int = 8
+    inject_think_token: bool = False  # Append <think>\n to generation prompts
+    prompt_max_tokens: int | None = None  # Token budget for history truncation
+
     # Tinker API
     base_url: str | None = None
 
@@ -109,9 +146,9 @@ async def generate_kernel(
     temperature: float,
 ) -> str:
     """Generate a kernel for a problem."""
-    # Build prompt
+    # Build prompt (same system prompt as training env)
     messages = [
-        {"role": "system", "content": "You are an expert GPU kernel developer."},
+        {"role": "system", "content": build_system_prompt(problem.backend)},
         {"role": "user", "content": problem.prompt},
     ]
     observation = renderer.build_generation_prompt(messages)
@@ -185,31 +222,101 @@ async def evaluate_problem(
             **eval_result,
         })
 
-    def speedup_value(sample: dict[str, Any]) -> float:
-        speedup = sample.get("speedup")
-        return float(speedup) if isinstance(speedup, (int, float)) else 0.0
-
-    # Find best result
-    correct_samples = [s for s in samples if s.get("correctness")]
-    if correct_samples:
-        # Best by speedup
-        best = max(correct_samples, key=speedup_value)
-    else:
-        # Best by compilation
-        compiled = [s for s in samples if s.get("compiled")]
-        best = compiled[0] if compiled else samples[0]
-
-    best_speedup: float | None = None
-    speedup_obj = best.get("speedup")
-    if isinstance(speedup_obj, (int, float)):
-        best_speedup = float(speedup_obj)
+    best_correct, best_compiled, best_speedup = pick_best_sample(samples)
 
     return EvalResult(
         level=problem.level,
         problem_id=problem.problem_id,
         samples=samples,
-        best_correct=bool(best.get("correctness")),
-        best_compiled=bool(best.get("compiled")),
+        best_correct=best_correct,
+        best_compiled=best_compiled,
+        best_speedup=best_speedup,
+    )
+
+
+async def evaluate_problem_multiturn(
+    sampling_client: tinker.SamplingClient,
+    problem: KernelBenchProblem,
+    renderer: renderers.Renderer,
+    cfg: EvalConfig,
+    tokenizer: object | None = None,
+) -> EvalResult:
+    """Evaluate a single problem using multi-turn refinement.
+
+    Reuses MultiTurnKernelBenchEnv so history truncation, feedback
+    construction, and think-token injection stay in one place.
+    """
+    from kernelbench_tinker.config.configs import EvalConfig as KernelEvalConfig
+    from kernelbench_tinker.envs.multiturn_kernelbench_env import MultiTurnKernelBenchEnv
+
+    eval_config = KernelEvalConfig(
+        num_correct_trials=cfg.num_correct_trials,
+        measure_performance=cfg.measure_performance,
+        num_perf_trials=cfg.num_perf_trials,
+        timing_method=cfg.timing_method,
+        precision=cfg.precision,
+        check_for_excessive_speedup=cfg.check_for_excessive_speedup,
+        excessive_speedup_threshold=cfg.excessive_speedup_threshold,
+        modal_timeout=cfg.modal_timeout,
+    )
+
+    env = MultiTurnKernelBenchEnv(
+        problem=problem,
+        renderer=renderer,
+        max_turns=cfg.multiturn_max_turns,
+        eval_config=eval_config,
+        system_prompt=build_system_prompt(problem.backend),
+        tokenizer=tokenizer,
+        prompt_max_tokens=cfg.prompt_max_tokens,
+        inject_think_token=cfg.inject_think_token,
+    )
+
+    completer = KernelBenchTokenCompleter(
+        sampling_client,
+        max_tokens=cfg.max_tokens,
+        temperature=cfg.temperature if cfg.num_samples == 1 else 1.0,
+        top_p=cfg.top_p,
+        seed=cfg.seed,
+    )
+
+    observation, stop = await env.initial_observation()
+    samples: list[dict[str, Any]] = []
+
+    for turn in range(cfg.multiturn_max_turns):
+        result = await completer(observation, stop)
+        step_result = await env.step(result.tokens)
+        m = step_result.metrics
+
+        kernel_code = env.state.history[-1]["kernel"]
+        if cfg.max_kernel_code_chars is not None and len(kernel_code) > cfg.max_kernel_code_chars:
+            kernel_code = kernel_code[: cfg.max_kernel_code_chars] + "..."
+
+        samples.append({
+            "sample_id": turn,
+            "turn": turn,
+            "kernel_code": kernel_code,
+            "format_ok": bool(m.get("format_ok")),
+            "compiled": bool(m.get("compiled")),
+            "correctness": bool(m.get("correctness")),
+            "tests_passed": m.get("tests_passed", 0),
+            "tests_total": m.get("tests_total", 0),
+            "speedup": m.get("speedup"),
+            "runtime_ms": m.get("runtime_ms"),
+        })
+
+        if step_result.episode_done:
+            break
+        observation = step_result.next_observation
+        stop = step_result.next_stop_condition
+
+    best_correct, best_compiled, best_speedup = pick_best_sample(samples)
+
+    return EvalResult(
+        level=problem.level,
+        problem_id=problem.problem_id,
+        samples=samples,
+        best_correct=best_correct,
+        best_compiled=best_compiled,
         best_speedup=best_speedup,
     )
 
@@ -274,6 +381,12 @@ async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
     results = []
     for problem in tqdm(problems, desc="Evaluating"):
         try:
+            if cfg.multiturn_enabled:
+                result = await evaluate_problem_multiturn(
+                    sampling_client, problem, renderer, cfg, tokenizer=tokenizer
+                )
+                results.append(result)
+                continue
             result = await evaluate_problem(
                 sampling_client, problem, renderer, cfg
             )
@@ -353,8 +466,8 @@ def main():
     # Log to TensorBoard if specified
     if cfg.tensorboard_log_dir:
         # Lazy import to avoid circular imports
-        from kernelbench_tinker.training.tensorboard_logger import create_tensorboard_logger
         from kernelbench_tinker.evaluation.eval_kernelbench import EvalResults, ProblemResult
+        from kernelbench_tinker.training.tensorboard_logger import create_tensorboard_logger
 
         tb_logger = create_tensorboard_logger(cfg.tensorboard_log_dir)
 

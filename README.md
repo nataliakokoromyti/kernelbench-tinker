@@ -31,6 +31,47 @@ We then extend `KernelBenchEnv` to support:
 - **Batching**: `KernelBenchEnvGroupBuilder` groups multiple rollouts for the same problem, enabling **GRPO-style** training where rewards are normalized within groups.
 - **Dataset Construction**: `KernelBenchDatasetBuilder` handles the iteration over KernelBench levels and problems, partitioning them into training and evaluation sets. You are welcome to extend it to support more problems beyond what is currently in KernelBench.
 
+### Multi-Turn RL
+
+We extend the single-turn pipeline with multi-turn iterative refinement, following the approach in [Kevin](https://arxiv.org/abs/2507.11948). Instead of generating one kernel per problem, the model generates a kernel, receives evaluation feedback (compilation errors, correctness failures, or speedup results), and refines its solution over multiple turns.
+
+`MultiTurnKernelBenchEnv` manages the multi-turn loop:
+- **History management**: Prior turns (prompt, response, feedback) are kept in context with token-based truncation to stay within the context window.
+- **Evaluation feedback**: Structured feedback tells the model what went wrong (compilation error, incorrect output, or correct but slow) so it can fix specific issues.
+- **Early stopping**: Optionally stop the episode when the kernel passes all correctness tests.
+
+Training uses GRPO with discounted returns across turns:
+- Per-turn scores are computed as `S = 0.3 * correct + speedup` (only for correct kernels).
+- Discounted returns: `R_t = S_t + γ * R_{t+1}` (backward recursion, γ=0.4 by default).
+- Advantages are normalized across all `group_size × max_turns` turn-level samples: `(R - mean) / (std + ε)`.
+- PPO with asymmetric clipping (Clip-Higher, ε_low=0.2, ε_high=0.28) and constant length normalization.
+
+Enable multi-turn via config:
+```yaml
+multiturn:
+    enabled: true
+    max_turns: 4      # Refinement turns per trajectory
+    gamma: 0.4        # Discount factor
+    aggregation: "sum" # "sum" or "max"
+```
+
+Or via CLI:
+```bash
+uv run python -m kernelbench_tinker.scripts.train_kernel_rl \
+    --config src/kernelbench_tinker/config/rl_kernelbench.yaml \
+    multiturn.enabled=true \
+    log_path=./runs/my_multiturn_experiment
+```
+
+Multi-turn inference is also supported via the eval script:
+```bash
+uv run python -m kernelbench_tinker.scripts.eval_kernel_rl \
+    checkpoint_path=<your_checkpoint> \
+    multiturn_enabled=true \
+    multiturn_max_turns=8 \
+    level=1
+```
+
 
 ### Directory Structure
 ```text
@@ -54,6 +95,7 @@ src/kernelbench_tinker/
   envs/
     kernelbench_client.py       # KernelBench Python API wrapper
     kernelbench_env.py          # Single-turn RL environment
+    multiturn_kernelbench_env.py # Multi-turn RL environment
   training/
     models.py                   # Model/renderer configuration
     reward.py                   # Reward shaping
@@ -282,7 +324,6 @@ Note the scope of this repo is an open-source implementation of KernelBench-Tink
 
 * More reward examples leveraging more fine-grained metrics
 * More reward hack checking
-* Multi-turn RL to have denser reward signal like [Kevin](https://arxiv.org/abs/2507.11948)
 * Improve Step time and training efficiency
 
 

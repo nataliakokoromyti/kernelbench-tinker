@@ -28,7 +28,6 @@ from typing import Any
 
 import modal
 
-
 # =============================================================================
 # GPU Architecture Mapping
 # =============================================================================
@@ -189,9 +188,10 @@ class KernelEvaluator:
         """
         import tempfile
         import time
-        
+
         import modal.experimental
         import torch
+
         from kernelbench.eval import eval_kernel_against_ref, get_torch_dtype_from_string
         from kernelbench.utils import set_gpu_arch
 

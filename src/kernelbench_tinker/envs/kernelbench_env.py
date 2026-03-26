@@ -30,48 +30,25 @@ from tinker_cookbook.rl.types import (
 )
 from tinker_cookbook.utils import logtree
 
+from kernelbench_tinker.config.configs import EvalConfig
+from kernelbench_tinker.envs.env_utils import (
+    EvalStepResult,
+    build_system_prompt,
+    evaluate_step,
+)
 from kernelbench_tinker.envs.kernelbench_client import (
     KernelBenchProblem,
     KernelEvalResult,
     ParsedResponse,
-    evaluate_kernel_async,
     get_problem_ids,
-    parse_structured_response,
 )
-from kernelbench_tinker.config.configs import EvalConfig
 from kernelbench_tinker.training.reward import (
-    compute_reward,
-    compute_reward_breakdown,
     RewardConfig,
+    compute_reward_breakdown,
 )
 from kernelbench_tinker.training.trace_logger import get_trace_logger
 
 logger = logging.getLogger(__name__)
-
-
-# Default system prompt for kernel generation (structured format)
-DEFAULT_SYSTEM_PROMPT = """You are an expert GPU kernel developer. Your task is to optimize PyTorch operations by writing efficient custom GPU kernels.
-
-When given a PyTorch model, you should:
-1. Analyze the operations being performed
-2. Write an optimized kernel implementation
-3. Return your solution as a Python class named `ModelNew` that implements the same interface
-
-Your kernel should:
-- Be functionally correct (produce the same outputs as the reference)
-- Be efficient (aim for speedup over the PyTorch baseline)
-- Handle edge cases properly
-- Use the specified backend (Triton, CUDA, etc.)
-
-You MUST respond in exactly this format:
-
-<KERNEL>
-```python
-# Your complete optimized implementation here
-class ModelNew(nn.Module):
-    ...
-```
-</KERNEL>"""
 
 
 class KernelBenchEnv(Env):
@@ -119,8 +96,7 @@ class KernelBenchEnv(Env):
         """Build the initial conversation for the problem."""
         messages: list[renderers.Message] = []
 
-        # Add system prompt if supported
-        messages.append({"role": "system", "content": DEFAULT_SYSTEM_PROMPT})
+        messages.append({"role": "system", "content": build_system_prompt(self.problem.backend)})
 
         # Add the problem prompt as user message
         messages.append({"role": "user", "content": self.problem.prompt})
@@ -151,97 +127,40 @@ class KernelBenchEnv(Env):
             StepResult with reward and episode done status
         """
         step_start = time.perf_counter()
-        # Parse the response to get text
-        message, _ = self.renderer.parse_response(action)
-        response_text = message.get("content", "")
-
-        # Parse structured response (extracts <KERNEL> block)
-        parsed = parse_structured_response(response_text)
-        kernel_code = parsed.kernel
-        # Check format validity
-        format_ok = parsed.format_ok
-
-        # Evaluate the kernel (Modal for isolated GPU execution)
-        eval_start = time.perf_counter()
-        cfg = self.eval_config
-        eval_result = await evaluate_kernel_async(
-            level=self.problem.level,
-            problem_id=self.problem.problem_id,
-            backend=self.problem.backend,
-            kernel_code=kernel_code,
-            dataset_src=self.problem.dataset_src,
-            num_correct_trials=cfg.num_correct_trials,
-            measure_performance=cfg.measure_performance,
-            num_perf_trials=cfg.num_perf_trials,
-            timing_method=cfg.timing_method,
-            precision=cfg.precision,
-            check_for_excessive_speedup=cfg.check_for_excessive_speedup,
-            excessive_speedup_threshold=cfg.excessive_speedup_threshold,
-            timeout=cfg.modal_timeout,
-        )
-        eval_time = time.perf_counter() - eval_start
-
-        # Compute reward (pass kernel_code for static checking)
-        reward = compute_reward(
-            eval_result,
-            self.reward_config,
-            kernel_code=kernel_code,
-            backend=self.problem.backend,
+        r = await evaluate_step(
+            self.problem, self.renderer, action,
+            self.eval_config, self.reward_config, step_start,
         )
 
         # Log the attempt
         logtree.log_text(f"Problem: Level {self.problem.level}, ID {self.problem.problem_id}")
-        logtree.log_text(f"Format OK: {'Yes' if format_ok else 'No'}")
-        logtree.log_text(f"Compiled: {'Yes' if eval_result['compiled'] else 'No'}")
+        logtree.log_text(f"Format OK: {'Yes' if r.format_ok else 'No'}")
+        logtree.log_text(f"Compiled: {'Yes' if r.eval_result['compiled'] else 'No'}")
         logtree.log_text(
-            f"Correctness: {eval_result['tests_passed']}/{eval_result['tests_total']}"
+            f"Correctness: {r.eval_result['tests_passed']}/{r.eval_result['tests_total']}"
         )
-        if eval_result.get("speedup"):
-            logtree.log_text(f"Speedup: {eval_result['speedup']:.2f}x")
-        logtree.log_text(f"Reward: {reward:.3f}")
-        error_message = eval_result.get("error_message")
+        if r.eval_result.get("speedup") is not None:
+            logtree.log_text(f"Speedup: {r.eval_result['speedup']:.2f}x")
+        logtree.log_text(f"Reward: {r.reward:.3f}")
+        error_message = r.eval_result.get("error_message")
         if error_message:
             logtree.log_text(f"Error: {error_message[:200]}")
 
-        # Build metrics
-        metrics: Metrics = {
-            "level": self.problem.level,
-            "problem_id": self.problem.problem_id,
-            "format_ok": float(format_ok),
-            "compiled": float(eval_result["compiled"]),
-            "correctness": float(eval_result["correctness"]),
-            "tests_passed": eval_result["tests_passed"],
-            "tests_total": eval_result["tests_total"],
-        }
-        if eval_result.get("speedup"):
-            metrics["speedup"] = eval_result["speedup"]
-        if eval_result.get("runtime_ms"):
-            metrics["runtime_ms"] = eval_result["runtime_ms"]
-        metrics["time/eval"] = eval_time
-        timing_metadata = (eval_result.get("metadata") or {}).get("timings", {})
-        if "reference_load_s" in timing_metadata:
-            metrics["time/ref_load"] = timing_metadata["reference_load_s"]
-        if "modal_eval_s" in timing_metadata:
-            metrics["time/modal_eval"] = timing_metadata["modal_eval_s"]
-        metrics["time/step_total"] = time.perf_counter() - step_start
-
         # Trace logging (prompt + response + eval)
         await self._log_trace(
-            parsed=parsed,
-            eval_result=eval_result,
-            format_ok=format_ok,
-            reward=reward,
-            metrics=metrics,
+            parsed=r.parsed,
+            eval_result=r.eval_result,
+            format_ok=r.format_ok,
+            reward=r.reward,
+            metrics=r.metrics,
         )
 
-        episode_done = True
-
         return StepResult(
-            reward=reward,
-            episode_done=episode_done,
+            reward=r.reward,
+            episode_done=True,
             next_observation=tinker.ModelInput.empty(),
             next_stop_condition=self.stop_condition,
-            metrics=metrics,
+            metrics=r.metrics,
         )
 
     async def _log_trace(
@@ -349,19 +268,6 @@ class KernelBenchRLDataset(RLDataset):
         shuffle: bool = True,
         num_epochs: int = 1,
     ):
-        """
-        Initialize the RL dataset.
-
-        Args:
-            problems: List of KernelBench problems
-            renderer: Tinker renderer for formatting
-            batch_size: Number of problems per batch
-            group_size: Number of rollouts per problem
-            eval_config: Configuration for kernel evaluation
-            reward_config: Reward configuration
-            shuffle: Whether to shuffle problems each epoch
-            num_epochs: Number of training epochs
-        """
         self.problems = problems
         self.renderer = renderer
         self.batch_size = batch_size
@@ -401,15 +307,13 @@ class KernelBenchRLDataset(RLDataset):
         for i in range(start_idx, end_idx):
             problem_idx = self._problem_indices[i]
             problem = self.problems[problem_idx]
-
-            builder = KernelBenchEnvGroupBuilder(
+            builders.append(KernelBenchEnvGroupBuilder(
                 problem=problem,
                 renderer=self.renderer,
                 group_size=self.group_size,
                 eval_config=self.eval_config,
                 reward_config=self.reward_config,
-            )
-            builders.append(builder)
+            ))
 
         return builders
 
@@ -425,6 +329,7 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
 
     # Problem selection
     level: int = 1
+    levels: list[int] | None = None  # Train on multiple levels (overrides level when set)
     start_problem: int | None = None
     end_problem: int | None = None
     backend: str = "triton"
@@ -452,6 +357,11 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     reward_speed_weight: float = 1.0
     reward_length_weight: float = 0.0
 
+    # Reward clipping and speed cap
+    reward_clip_min: float | None = None
+    reward_clip_max: float | None = None
+    reward_speed_max_reward: float = 10.0  # Cap on speed reward component
+
     # Reward hacking detection (static checker)
     reward_enable_static_checker: bool = True
     reward_static_checker_backend: str = "triton"
@@ -464,6 +374,9 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
 
     # Test split
     test_fraction: float = 0.1
+    # Explicit holdout indices per level (overrides test_fraction when set)
+    # Format: {level: [problem_ids]} e.g. {1: [3,10,25], 2: [10,20,30]}
+    holdout_indices: dict[int, list[int]] | None = None
 
     # Prompt configuration
     prompt_option: str = "one_shot"  # "zero_shot", "one_shot", "few_shot"
@@ -481,33 +394,54 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
         Args:
             tokenizer: The tokenizer to use for the renderer. Required for most renderers.
         """
-        # Get problem IDs
-        problem_ids = get_problem_ids(
-            self.level,
-            start=self.start_problem,
-            end=self.end_problem,
-            dataset_src=self.dataset_src,
-        )
+        # Determine which levels to use
+        active_levels = self.levels if self.levels else [self.level]
 
-        # Create problems
-        all_problems = [
-            KernelBenchProblem(
-                level=self.level,
-                problem_id=pid,
-                backend=self.backend,
+        # Collect problems across all levels
+        all_problems: list[KernelBenchProblem] = []
+        for lvl in active_levels:
+            # Get problem IDs
+            problem_ids = get_problem_ids(
+                lvl,
+                start=self.start_problem,
+                end=self.end_problem,
                 dataset_src=self.dataset_src,
-                prompt_option=self.prompt_option,
-                prompt_precision=self.prompt_precision or self.precision,
-                prompt_include_hardware=self.prompt_include_hardware,
-                prompt_gpu_name=self.prompt_gpu_name or (
-                    self.modal_gpu_type if self.prompt_include_hardware else None
-                ),
             )
-            for pid in problem_ids
-        ]
+
+            # Create problems
+            all_problems.extend(
+                KernelBenchProblem(
+                    level=lvl,
+                    problem_id=pid,
+                    backend=self.backend,
+                    dataset_src=self.dataset_src,
+                    prompt_option=self.prompt_option,
+                    prompt_precision=self.prompt_precision or self.precision,
+                    prompt_include_hardware=self.prompt_include_hardware,
+                    prompt_gpu_name=self.prompt_gpu_name or (
+                        self.modal_gpu_type if self.prompt_include_hardware else None
+                    ),
+                )
+                for pid in problem_ids
+            )
 
         # Split into train/test
-        if self.test_fraction > 0 and len(all_problems) > 1:
+        if self.holdout_indices:
+            # Explicit holdout: separate by (level, problem_id) membership
+            holdout_set = {
+                (lvl, pid)
+                for lvl, pids in self.holdout_indices.items()
+                for pid in pids
+            }
+            train_problems = [
+                p for p in all_problems
+                if (p.level, p.problem_id) not in holdout_set
+            ]
+            test_problems = [
+                p for p in all_problems
+                if (p.level, p.problem_id) in holdout_set
+            ] or None
+        elif self.test_fraction > 0 and len(all_problems) > 1:
             n_test = max(1, int(len(all_problems) * self.test_fraction))
             # Use last N problems as test set for reproducibility
             train_problems = all_problems[:-n_test]
@@ -539,6 +473,9 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             correctness_weight=self.reward_correctness_weight,
             speed_weight=self.reward_speed_weight,
             length_weight=self.reward_length_weight,
+            speed_max_reward=self.reward_speed_max_reward,
+            reward_clip_min=self.reward_clip_min,
+            reward_clip_max=self.reward_clip_max,
             enable_static_checker=self.reward_enable_static_checker,
             static_checker_backend=self.reward_static_checker_backend or self.backend,
             static_checker_precision=self.reward_static_checker_precision or self.precision,
@@ -547,7 +484,11 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
         )
 
         # Configure Modal evaluator with the same config
-        from kernelbench_tinker.modal.evaluator import ModalEvaluatorConfig, set_modal_evaluator, ModalKernelEvaluator
+        from kernelbench_tinker.modal.evaluator import (
+            ModalEvaluatorConfig,
+            ModalKernelEvaluator,
+            set_modal_evaluator,
+        )
         modal_config = ModalEvaluatorConfig(
             enabled=True,
             gpu_type=eval_config.modal_gpu_type,
@@ -583,4 +524,3 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             )
 
         return train_dataset, test_dataset
-

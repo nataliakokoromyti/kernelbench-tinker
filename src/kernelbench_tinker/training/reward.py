@@ -10,7 +10,7 @@ This module implements reward functions that combine:
 
 from __future__ import annotations
 
-import math
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +29,8 @@ except ImportError:
 
 if TYPE_CHECKING:
     from kernelbench_tinker.envs.kernelbench_client import KernelEvalResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,7 +60,7 @@ class RewardConfig:
     # Speed reward configuration
     # Linear speedup: reward = T_baseline / T_kernel
     # ==========================================================================
-    speed_baseline: float = 1.0  # Speedup threshold (1.0 = same as baseline)
+    speed_baseline: float = 0.0  # Speedup threshold (0.0 = raw speedup as reward)
     speed_scale: float = 1.0  # Linear scaling (not log)
     speed_max_reward: float = 10.0  # Cap to prevent outliers
 
@@ -97,6 +99,12 @@ class RewardConfig:
     # Warning checks - these will log warnings but NOT zero the reward
     # Default: all warning checks from static_checker.WARNING_CHECKS
     static_checker_warnings: list[str] | None = None  # None = use defaults (all warning checks)
+
+    # ==========================================================================
+    # Reward clipping configuration
+    # ==========================================================================
+    reward_clip_min: float | None = None  # Lower bound on total reward (None = no clipping)
+    reward_clip_max: float | None = None  # Upper bound on total reward (None = no clipping)
 
 
 def format_reward(eval_result: "KernelEvalResult", config: RewardConfig) -> float:
@@ -189,13 +197,11 @@ def speed_reward(
     if speedup is None or speedup <= 0:
         return 0.0
 
-    # Linear speedup, not log-scaled
-    # If speedup <= baseline (1.0), no speed bonus
-    if speedup <= config.speed_baseline:
+    # Linear speedup: reward = speedup for correct kernels
+    # With default speed_baseline=0.0: 2x speedup = 2.0 reward
+    if config.speed_baseline > 0 and speedup <= config.speed_baseline:
         return 0.0
 
-    # Linear reward: speedup - 1.0 (so 2x speedup = 1.0 reward, 3x = 2.0, etc.)
-    # This matches the default formula where reward = speedup for correct kernels
     reward = config.speed_scale * (speedup - config.speed_baseline)
 
     # Clamp to max to prevent outliers
@@ -337,16 +343,11 @@ def compute_reward(
         )
         
         # Log warnings (don't zero reward)
-        if warnings:
-            import logging
-            logger = logging.getLogger(__name__)
-            for warning in warnings:
-                logger.warning(f"Static checker warning: {warning}")
-        
+        for warning in warnings:
+            logger.warning(f"Static checker warning: {warning}")
+
         # Zero reward if errors detected
         if has_errors:
-            import logging
-            logger = logging.getLogger(__name__)
             for error in errors:
                 logger.error(f"Reward hacking detected (reward set to 0): {error}")
             return 0.0
@@ -401,6 +402,11 @@ def compute_reward(
         l_reward = length_reward(eval_result, config)
         total += config.length_weight * l_reward
 
+    # Reward clipping
+    if config.reward_clip_min is not None:
+        total = max(total, config.reward_clip_min)
+    if config.reward_clip_max is not None:
+        total = min(total, config.reward_clip_max)
 
     return total
 
@@ -446,3 +452,35 @@ def compute_reward_breakdown(
         "static_checker_errors": static_checker_errors,
         "static_checker_warnings": static_checker_warnings,
     }
+
+
+def compute_discounted_returns(
+    step_scores: list[float],
+    gamma: float = 0.4,
+    aggregation: str = "sum",
+) -> list[float]:
+    """Compute discounted returns for multi-turn RL.
+
+    sum: R_t = S_t + gamma * R_{t+1}  (backward recursion)
+    max: R_t = max{ gamma^(i-t) * S_i }
+    """
+    if aggregation not in ("sum", "max"):
+        raise ValueError(f"Unknown aggregation mode: {aggregation!r}. Must be 'sum' or 'max'.")
+
+    if not step_scores:
+        return []
+
+    T = len(step_scores)
+
+    if aggregation == "sum":
+        returns = [0.0] * T
+        returns[-1] = step_scores[-1]
+        for t in range(T - 2, -1, -1):
+            returns[t] = step_scores[t] + gamma * returns[t + 1]
+        return returns
+
+    # aggregation == "max"
+    return [
+        max(gamma ** (i - t) * step_scores[i] for i in range(t, T))
+        for t in range(T)
+    ]

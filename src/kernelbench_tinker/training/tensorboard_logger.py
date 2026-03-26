@@ -17,9 +17,8 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
-
 from tinker_cookbook.rl.types import TrajectoryGroup
+from torch.utils.tensorboard import SummaryWriter
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +197,41 @@ class TensorBoardLogger:
         # Log any speedup metrics if available
         if "kernel/mean_speedup" in metrics:
             self.writer.add_scalar("Kernel/MeanSpeedup", metrics["kernel/mean_speedup"], step)
+
+        # === Multi-turn Reward Metrics ===
+        # Multi-turn emits reward/discounted_{mean,std,min,max}
+        if "reward/discounted_mean" in metrics:
+            self.writer.add_scalar("Reward/DiscountedMean", metrics["reward/discounted_mean"], step)
+        if "reward/discounted_std" in metrics:
+            self.writer.add_scalar("Reward/DiscountedStdDev", metrics["reward/discounted_std"], step)
+        if "reward/discounted_min" in metrics:
+            self.writer.add_scalar("Reward/DiscountedMin", metrics["reward/discounted_min"], step)
+        if "reward/discounted_max" in metrics:
+            self.writer.add_scalar("Reward/DiscountedMax", metrics["reward/discounted_max"], step)
+
+        # === Multi-turn Kernel Quality Metrics ===
+        if "multiturn/format_rate" in metrics:
+            self.writer.add_scalar("MultiTurn/FormatRate", metrics["multiturn/format_rate"], step)
+        if "multiturn/compile_rate" in metrics:
+            self.writer.add_scalar("MultiTurn/CompileRate", metrics["multiturn/compile_rate"], step)
+        if "multiturn/correct_rate" in metrics:
+            self.writer.add_scalar("MultiTurn/CorrectRate", metrics["multiturn/correct_rate"], step)
+
+        # === Multi-turn Failure Rate ===
+        if "kernel/failure_rate" in metrics:
+            self.writer.add_scalar("Kernel/FailureRate", metrics["kernel/failure_rate"], step)
+        if "multiturn/failure_rate" in metrics:
+            self.writer.add_scalar("MultiTurn/FailureRate", metrics["multiturn/failure_rate"], step)
+
+        # === Multi-turn Specific Metrics ===
+        if "multiturn/raw_score_mean" in metrics:
+            self.writer.add_scalar("MultiTurn/RawScoreMean", metrics["multiturn/raw_score_mean"], step)
+        if "multiturn/success_rate" in metrics:
+            self.writer.add_scalar("MultiTurn/SuccessRate", metrics["multiturn/success_rate"], step)
+        if "multiturn/avg_turns" in metrics:
+            self.writer.add_scalar("MultiTurn/AvgTurns", metrics["multiturn/avg_turns"], step)
+        if "multiturn/best_speedup_mean" in metrics:
+            self.writer.add_scalar("MultiTurn/BestSpeedupMean", metrics["multiturn/best_speedup_mean"], step)
 
     def log_trajectory_histograms(
         self,

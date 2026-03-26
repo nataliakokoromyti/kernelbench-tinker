@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import os
 import re
 import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-import logging
 from typing import Any, TypedDict, cast
 
 logger = logging.getLogger(__name__)
@@ -33,11 +33,18 @@ KERNEL_BLOCK_SIMPLE_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE
 )
 
+# Summary block pattern - reasoning summary inside <SUMMARY>...</SUMMARY>
+SUMMARY_BLOCK_PATTERN = re.compile(
+    r"<SUMMARY>(.*?)</SUMMARY>",
+    re.DOTALL | re.IGNORECASE
+)
+
 
 @dataclass
 class ParsedResponse:
     """Parsed model response with kernel blocks."""
     kernel: str   # Kernel code (from <KERNEL> block or extracted code block)
+    cot_summary: str  # Reasoning summary (from <SUMMARY> block)
     raw: str      # Original raw response
     format_ok: bool  # Whether we successfully extracted kernel code
 
@@ -94,8 +101,15 @@ def parse_structured_response(text: str) -> ParsedResponse:
     # Check if we got valid kernel code
     format_ok = bool(kernel) and ("class ModelNew" in kernel or "def forward" in kernel)
 
+    # Extract CoT summary from <SUMMARY> block
+    cot_summary = ""
+    summary_match = SUMMARY_BLOCK_PATTERN.search(text)
+    if summary_match:
+        cot_summary = summary_match.group(1).strip()
+
     return ParsedResponse(
         kernel=kernel,
+        cot_summary=cot_summary,
         raw=raw,
         format_ok=format_ok,
     )
@@ -487,6 +501,7 @@ class KernelBenchProblem:
     prompt_gpu_name: str | None = None
 
     _prompt: str | None = field(default=None, repr=False)
+    _base_prompt: str | None = field(default=None, repr=False)
 
     @property
     def prompt(self) -> str:
@@ -504,3 +519,23 @@ class KernelBenchProblem:
             )
         return self._prompt
 
+    @property
+    def base_prompt(self) -> str:
+        """Get the zero-shot prompt (no examples) for refinement turns.
+
+        In multi-turn training, the one-shot example is included only on the
+        first turn.  Subsequent turns use this stripped-down prompt to save
+        context tokens.
+        """
+        if self._base_prompt is None:
+            self._base_prompt = get_prompt_for_problem(
+                self.level,
+                self.problem_id,
+                self.backend,
+                option="zero_shot",
+                dataset_src=self.dataset_src,
+                precision=self.prompt_precision,
+                include_hardware=self.prompt_include_hardware,
+                gpu_name=self.prompt_gpu_name,
+            )
+        return self._base_prompt

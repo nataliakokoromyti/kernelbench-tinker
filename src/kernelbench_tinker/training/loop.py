@@ -16,16 +16,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from pathlib import Path
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
 
 import chz
 import numpy as np
 import tinker
 import torch
 from tinker.types import LossFnType
-
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.completers import TinkerTokenCompleter
 from tinker_cookbook.rl.data_processing import (
@@ -35,20 +34,36 @@ from tinker_cookbook.rl.data_processing import (
 )
 from tinker_cookbook.rl.rollouts import do_group_rollout
 from tinker_cookbook.rl.types import (
+    Env,
     EnvGroupBuilder,
     TrajectoryGroup,
 )
 from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.misc_utils import timed
 
+from kernelbench_tinker.config.configs import MultiTurnConfig
 from kernelbench_tinker.envs.kernelbench_env import KernelBenchDatasetBuilder
-from kernelbench_tinker.training.models import get_adam_params
+from kernelbench_tinker.envs.multiturn_kernelbench_env import wrap_builders_as_multiturn
+from kernelbench_tinker.training.models import (
+    KernelBenchTokenCompleter,
+    build_loss_fn_config,
+    get_adam_params,
+)
+from kernelbench_tinker.training.multiturn import (
+    apply_discounted_returns_to_trajectories,
+    compute_multiturn_advantages,
+    compute_multiturn_trajectory_metrics,
+    do_multiturn_group_rollout_and_filter,
+    flatten_multiturn_trajectory_groups,
+)
 from kernelbench_tinker.training.tensorboard_logger import (
     TensorBoardConfig,
     TensorBoardLogger,
     create_tensorboard_logger,
 )
 from kernelbench_tinker.training.trace_logger import TraceLogger, set_trace_logger
+
+logger = logging.getLogger(__name__)
 
 
 def remove_mask(datum: tinker.Datum) -> tinker.Datum:
@@ -61,8 +76,6 @@ def remove_mask(datum: tinker.Datum) -> tinker.Datum:
         model_input=datum.model_input,
         loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
     )
-
-logger = logging.getLogger(__name__)
 
 
 @chz.chz
@@ -82,6 +95,9 @@ class TrainingConfig:
     dataset_builder: KernelBenchDatasetBuilder = chz.field(
         default_factory=KernelBenchDatasetBuilder
     )
+
+    # Multi-turn specific config
+    multiturn: MultiTurnConfig = chz.field(default_factory=MultiTurnConfig)
 
     # Training configuration
     num_substeps: int = 1  # Optimizer steps per batch
@@ -152,7 +168,6 @@ async def do_group_rollout_and_filter(
         trajectory_group = trajectory_groups[0]
 
     return trajectory_group
-
 
 
 def compute_trajectory_metrics(
@@ -240,6 +255,8 @@ async def train_step(
     learning_rate: float,
     num_substeps: int,
     loss_fn: LossFnType,
+    max_grad_norm: float = 0.0,
+    loss_fn_config: dict[str, float] | None = None,
 ) -> list[torch.Tensor]:
     """
     Perform a training step with gradient accumulation.
@@ -250,6 +267,8 @@ async def train_step(
         learning_rate: Learning rate
         num_substeps: Number of optimizer steps
         loss_fn: Loss function type
+        max_grad_norm: Maximum gradient norm for clipping (0.0 = no clipping)
+        loss_fn_config: Optional loss function config (e.g. PPO clip thresholds)
 
     Returns:
         List of training logprobs tensors
@@ -262,8 +281,11 @@ async def train_step(
         batch = data[i : i + substep_size]
 
         # Forward-backward pass (remove mask key from datums)
+        fwd_bwd_kwargs: dict[str, Any] = {"loss_fn": loss_fn}
+        if loss_fn_config is not None:
+            fwd_bwd_kwargs["loss_fn_config"] = loss_fn_config
         fwd_bwd_future = await training_client.forward_backward_async(
-            [remove_mask(d) for d in batch], loss_fn=loss_fn
+            [remove_mask(d) for d in batch], **fwd_bwd_kwargs
         )
         fwd_bwd_result = await fwd_bwd_future.result_async()
 
@@ -272,7 +294,7 @@ async def train_step(
             training_logprobs.append(output["logprobs"].to_torch())
 
         # Optimizer step
-        adam_params = get_adam_params(learning_rate)
+        adam_params = get_adam_params(learning_rate, max_grad_norm=max_grad_norm)
         optim_future = await training_client.optim_step_async(adam_params)
         await optim_future.result_async()
 
@@ -335,6 +357,13 @@ async def run_training_loop(
     Args:
         cfg: Training configuration
     """
+    is_multiturn = cfg.multiturn.enabled
+    if is_multiturn:
+        logger.info("Running in MULTI-TURN mode")
+        logger.info(f"  max_turns (refinement turns per trajectory): {cfg.multiturn.max_turns}")
+        logger.info(f"  group_size (parallel trajectories, m): {cfg.dataset_builder.group_size}")
+        logger.info(f"  gamma (discount factor): {cfg.multiturn.gamma}")
+
     # Setup logging
     os.makedirs(cfg.log_path, exist_ok=True)
     ml_logger = ml_log.setup_logging(
@@ -415,11 +444,19 @@ async def run_training_loop(
 
     # Create dataset (pass tokenizer for renderer)
     dataset_builder = cfg.dataset_builder
-    logger.info("Using KernelBenchDatasetBuilder")
+    if is_multiturn:
+        logger.info("Using KernelBenchDatasetBuilder (multi-turn, max_turns=%d)", cfg.multiturn.max_turns)
+    else:
+        logger.info("Using KernelBenchDatasetBuilder")
 
     train_dataset, test_dataset = await dataset_builder(tokenizer=tokenizer)
     num_batches = len(train_dataset)
     logger.info(f"Training on {num_batches} batches")
+
+    # Warmup schedule (multi-turn only)
+    warmup_batches = int(num_batches * cfg.multiturn.warmup_ratio) if is_multiturn else 0
+    if warmup_batches > 0:
+        logger.info(f"Linear LR warmup for {warmup_batches} batches")
 
     # Get initial sampling client
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
@@ -435,56 +472,165 @@ async def run_training_loop(
             "optim/lr": cfg.learning_rate,
         }
 
-        # Get batch of env group builders
+        # Get batch of env group builders (always single-turn from dataset)
         env_group_builders = train_dataset.get_batch(batch_idx)
 
-        # Collect rollouts (single-turn)
-        with timed("rollout", metrics):
-            try:
-                results = await asyncio.gather(*[
-                    do_group_rollout_and_filter(
-                        sampling_client,
-                        builder,
-                        max_tokens=cfg.max_tokens,
-                        temperature=cfg.temperature,
-                        do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
-                    )
-                    for builder in env_group_builders
-                ], return_exceptions=True)
-            except Exception:
-                logger.exception("Group rollout failed during gather")
-                raise
-
-        # Filter out None (removed constant reward groups) and exceptions
-        trajectory_groups = []
-        for tg in results:
-            if isinstance(tg, Exception):
-                logger.error("Group rollout failed", exc_info=tg)
-            elif tg is not None:
-                trajectory_groups.append(tg)
-
-        if len(trajectory_groups) == 0:
-            logger.warning(f"Batch {batch_idx}: All groups filtered out, skipping")
-            continue
-
-        # Compute metrics
-        traj_metrics = compute_trajectory_metrics(trajectory_groups)
-        metrics.update(traj_metrics)
-
-        # Compute advantages and assemble training data
-        with timed("assemble_data", metrics):
-            advantages = compute_advantages(trajectory_groups)
-            data, _metadata = assemble_training_data(trajectory_groups, advantages)
-
-        # Training step
-        with timed("train", metrics):
-            await train_step(
-                data,
-                training_client,
-                cfg.learning_rate,
-                cfg.num_substeps,
-                cfg.loss_fn,
+        if is_multiturn:
+            # Wrap single-turn builders as multi-turn
+            env_group_builders = wrap_builders_as_multiturn(
+                env_group_builders, cfg.multiturn, tokenizer
             )
+
+            # ----- Multi-turn rollouts -----
+            # Response length extension (multi-turn only)
+            effective_max_tokens = cfg.max_tokens
+            if (
+                cfg.multiturn.max_tokens_extended > 0
+                and batch_idx >= cfg.multiturn.max_tokens_extend_after_step
+            ):
+                effective_max_tokens = cfg.multiturn.max_tokens_extended
+                if batch_idx == cfg.multiturn.max_tokens_extend_after_step:
+                    logger.info(
+                        f"Extending max_tokens from {cfg.max_tokens} to "
+                        f"{cfg.multiturn.max_tokens_extended} at step {batch_idx}"
+                    )
+
+            with timed("rollout", metrics):
+                try:
+                    results = await asyncio.gather(
+                        *[
+                            do_multiturn_group_rollout_and_filter(
+                                sampling_client,
+                                builder,
+                                max_tokens=effective_max_tokens,
+                                temperature=cfg.multiturn.temperature,
+                                do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                                top_p=cfg.multiturn.top_p,
+                                seed=cfg.multiturn.seed,
+                            )
+                            for builder in env_group_builders
+                        ],
+                        return_exceptions=True,
+                    )
+                except Exception:
+                    logger.exception("Group rollout failed during gather")
+                    raise
+
+            trajectory_groups: list[TrajectoryGroup] = []
+            env_groups: list[Sequence[Env]] = []
+            for r in results:
+                if isinstance(r, BaseException):
+                    logger.error("Group rollout failed", exc_info=r)
+                    continue
+                tg, envs = r
+                if tg is not None and envs is not None:
+                    trajectory_groups.append(tg)
+                    env_groups.append(envs)
+
+            if len(trajectory_groups) == 0:
+                logger.warning(
+                    f"Batch {batch_idx}: All groups filtered out, skipping"
+                )
+                continue
+
+            with timed("discount_returns", metrics):
+                apply_discounted_returns_to_trajectories(
+                    trajectory_groups, env_groups,
+                    gamma=cfg.multiturn.gamma,
+                    aggregation=cfg.multiturn.aggregation,
+                )
+
+            traj_metrics = compute_multiturn_trajectory_metrics(
+                trajectory_groups, env_groups
+            )
+            metrics.update(traj_metrics)
+
+            # Flatten: each turn becomes its own single-transition trajectory
+            # so that advantage normalization is across all group_size * n turn-level samples
+            with timed("flatten", metrics):
+                trajectory_groups = flatten_multiturn_trajectory_groups(
+                    trajectory_groups
+                )
+
+            # Compute advantages and assemble training data
+            with timed("assemble_data", metrics):
+                advantages = compute_multiturn_advantages(trajectory_groups)
+
+                if cfg.multiturn.constant_length_norm > 0:
+                    for i in range(len(advantages)):
+                        advantages[i] = advantages[i] / cfg.multiturn.constant_length_norm
+
+                data, _metadata = assemble_training_data(trajectory_groups, advantages)
+
+            # Learning rate warmup (multi-turn only)
+            if warmup_batches > 0 and batch_idx < warmup_batches:
+                lr = cfg.learning_rate * (batch_idx + 1) / warmup_batches
+            else:
+                lr = cfg.learning_rate
+            metrics["optim/lr"] = lr
+
+            # Training step with PPO clip and grad norm
+            with timed("train", metrics):
+                await train_step(
+                    data,
+                    training_client,
+                    lr,
+                    cfg.multiturn.num_substeps,
+                    cfg.multiturn.loss_fn,  # type: ignore[arg-type]
+                    max_grad_norm=cfg.multiturn.max_grad_norm,
+                    loss_fn_config=build_loss_fn_config(
+                        cfg.multiturn.clip_epsilon_low,
+                        cfg.multiturn.clip_epsilon_high,
+                    ),
+                )
+        else:
+            # Collect rollouts (single-turn)
+            with timed("rollout", metrics):
+                try:
+                    st_results = await asyncio.gather(*[
+                        do_group_rollout_and_filter(
+                            sampling_client,
+                            builder,
+                            max_tokens=cfg.max_tokens,
+                            temperature=cfg.temperature,
+                            do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                        )
+                        for builder in env_group_builders
+                    ], return_exceptions=True)
+                except Exception:
+                    logger.exception("Group rollout failed during gather")
+                    raise
+
+            # Filter out None (removed constant reward groups) and exceptions
+            trajectory_groups = []
+            for tg in st_results:
+                if isinstance(tg, Exception):
+                    logger.error("Group rollout failed", exc_info=tg)
+                elif tg is not None:
+                    trajectory_groups.append(tg)
+
+            if len(trajectory_groups) == 0:
+                logger.warning(f"Batch {batch_idx}: All groups filtered out, skipping")
+                continue
+
+            # Compute metrics
+            traj_metrics = compute_trajectory_metrics(trajectory_groups)
+            metrics.update(traj_metrics)
+
+            # Compute advantages and assemble training data
+            with timed("assemble_data", metrics):
+                advantages = compute_advantages(trajectory_groups)
+                data, _metadata = assemble_training_data(trajectory_groups, advantages)
+
+            # Training step
+            with timed("train", metrics):
+                await train_step(
+                    data,
+                    training_client,
+                    cfg.learning_rate,
+                    cfg.num_substeps,
+                    cfg.loss_fn,
+                )
 
         # Save checkpoint and get new sampling client
         sampling_client, checkpoint_metrics = await save_checkpoint_and_get_sampling_client(
@@ -501,14 +647,25 @@ async def run_training_loop(
             tb_logger.log_training_metrics(metrics, batch_idx)
             tb_logger.log_trajectory_histograms(trajectory_groups, batch_idx)
             tb_logger.log_per_level_metrics(trajectory_groups, batch_idx)
-            tb_logger.log_advantage_statistics(advantages, batch_idx)
+            adv_arrays = [a.numpy() if isinstance(a, torch.Tensor) else a for a in advantages]
+            tb_logger.log_advantage_statistics(adv_arrays, batch_idx)
 
-        logger.info(
-            f"Batch {batch_idx}/{num_batches}: "
-            f"reward={metrics.get('reward/mean', 0):.3f}, "
-            f"compile={metrics.get('kernel/compile_rate', 0):.1%}, "
-            f"correct={metrics.get('kernel/correct_rate', 0):.1%}"
-        )
+        if is_multiturn:
+            logger.info(
+                f"Batch {batch_idx}/{num_batches}: "
+                f"raw_score={metrics.get('multiturn/raw_score_mean', 0):.3f}, "
+                f"compile={metrics.get('multiturn/compile_rate', 0):.1%}, "
+                f"correct={metrics.get('multiturn/correct_rate', 0):.1%}, "
+                f"success={metrics.get('multiturn/success_rate', 0):.1%}, "
+                f"avg_turns={metrics.get('multiturn/avg_turns', 0):.1f}"
+            )
+        else:
+            logger.info(
+                f"Batch {batch_idx}/{num_batches}: "
+                f"reward={metrics.get('reward/mean', 0):.3f}, "
+                f"compile={metrics.get('kernel/compile_rate', 0):.1%}, "
+                f"correct={metrics.get('kernel/correct_rate', 0):.1%}"
+            )
 
     # Save final checkpoint
     if start_batch < num_batches:
