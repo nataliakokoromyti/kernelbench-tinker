@@ -79,6 +79,7 @@ class EvalConfig:
 
     # Evaluation configuration
     level: int = 1
+    levels: list[int] | None = None  # Iterate multiple levels (overrides level when set)
     start_problem: int | None = None
     end_problem: int | None = None
     backend: str = "triton"
@@ -100,9 +101,17 @@ class EvalConfig:
     check_for_excessive_speedup: bool = True
     excessive_speedup_threshold: float = 10.0
 
+    # Evaluator backend selection: "modal" (cloud NVIDIA) or "local" (in-process subprocess for AMD/HIP)
+    evaluator_backend: str = "modal"
+
     # Modal configuration
     modal_gpu_type: str = "A100"
     modal_timeout: float = 120.0
+
+    # Local evaluator configuration (used when evaluator_backend == "local")
+    # gpu_arch is passed to set_gpu_arch() — e.g. ["gfx950"] for MI350X, ["gfx942"] for MI300X
+    gpu_arch: list[str] | None = None
+    local_timeout: float = 300.0
 
     # Prompt configuration
     prompt_option: str = "one_shot"
@@ -257,7 +266,11 @@ async def evaluate_problem_multiturn(
         precision=cfg.precision,
         check_for_excessive_speedup=cfg.check_for_excessive_speedup,
         excessive_speedup_threshold=cfg.excessive_speedup_threshold,
+        evaluator_backend=cfg.evaluator_backend,
+        modal_gpu_type=cfg.modal_gpu_type,
         modal_timeout=cfg.modal_timeout,
+        gpu_arch=list(cfg.gpu_arch) if cfg.gpu_arch else [],
+        local_timeout=cfg.local_timeout,
     )
 
     env = MultiTurnKernelBenchEnv(
@@ -323,18 +336,9 @@ async def evaluate_problem_multiturn(
 
 async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
     """Run full evaluation."""
-    from kernelbench_tinker.modal.evaluator import (
-        ModalEvaluatorConfig,
-        ModalKernelEvaluator,
-        set_modal_evaluator,
-    )
-
-    modal_config = ModalEvaluatorConfig(
-        enabled=True,
-        gpu_type=cfg.modal_gpu_type,
-        timeout=int(cfg.modal_timeout),
-    )
-    set_modal_evaluator(ModalKernelEvaluator(modal_config))
+    # Install the appropriate evaluator backend (modal vs local).
+    from kernelbench_tinker.envs.evaluator_dispatch import set_evaluator_from_eval_config
+    set_evaluator_from_eval_config(cfg)
 
     # Create Tinker client
     service_client = tinker.ServiceClient(base_url=cfg.base_url)
@@ -353,29 +357,35 @@ async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
     tokenizer = tokenizer_utils.get_tokenizer(cfg.model_name)
     renderer = renderers.get_renderer(renderer_name, tokenizer)
 
-    # Get problems
-    problem_ids = get_problem_ids(
-        cfg.level,
-        start=cfg.start_problem,
-        end=cfg.end_problem,
-        dataset_src=cfg.dataset_src,
-    )
+    # Iterate one or more levels (the for-loop the user asked for: each task,
+    # each level, end-to-end on the same configured backend).
+    active_levels = list(cfg.levels) if cfg.levels else [cfg.level]
 
-    problems = [
-        KernelBenchProblem(
-            level=cfg.level,
-            problem_id=pid,
-            backend=cfg.backend,
+    problems: list[KernelBenchProblem] = []
+    for lvl in active_levels:
+        problem_ids = get_problem_ids(
+            lvl,
+            start=cfg.start_problem,
+            end=cfg.end_problem,
             dataset_src=cfg.dataset_src,
-            prompt_option=cfg.prompt_option,
-            prompt_precision=cfg.precision,
-            prompt_include_hardware=cfg.prompt_include_hardware,
-            prompt_gpu_name=cfg.prompt_gpu_name,
         )
-        for pid in problem_ids
-    ]
+        problems.extend(
+            KernelBenchProblem(
+                level=lvl,
+                problem_id=pid,
+                backend=cfg.backend,
+                dataset_src=cfg.dataset_src,
+                prompt_option=cfg.prompt_option,
+                prompt_precision=cfg.precision,
+                prompt_include_hardware=cfg.prompt_include_hardware,
+                prompt_gpu_name=cfg.prompt_gpu_name,
+            )
+            for pid in problem_ids
+        )
 
-    logger.info(f"Evaluating {len(problems)} problems from level {cfg.level}")
+    logger.info(
+        f"Evaluating {len(problems)} problems across levels={active_levels} backend={cfg.backend}"
+    )
 
     # Evaluate each problem
     results = []
@@ -423,7 +433,10 @@ async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
             "checkpoint_path": cfg.checkpoint_path,
             "model_name": cfg.model_name,
             "level": cfg.level,
+            "levels": list(cfg.levels) if cfg.levels else [cfg.level],
             "backend": cfg.backend,
+            "evaluator_backend": cfg.evaluator_backend,
+            "gpu_arch": list(cfg.gpu_arch) if cfg.gpu_arch else [],
             "num_samples": cfg.num_samples,
         },
         "metrics": metrics,
@@ -446,8 +459,8 @@ def main():
 
     logger.info("Starting KernelBench Evaluation")
     logger.info(f"Checkpoint: {cfg.checkpoint_path or 'base model'}")
-    logger.info(f"Level: {cfg.level}")
-    logger.info(f"Backend: {cfg.backend}")
+    logger.info(f"Levels: {list(cfg.levels) if cfg.levels else [cfg.level]}")
+    logger.info(f"Backend: {cfg.backend} (evaluator={cfg.evaluator_backend})")
 
     # Run evaluation
     output = asyncio.run(run_evaluation(cfg))

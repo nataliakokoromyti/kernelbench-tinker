@@ -1,0 +1,156 @@
+# KernelBench RL Training Configuration — HIP backend on AMD MI350X
+# ===================================================================
+#
+# Drives the kernelbench-tinker integration against AMD GPUs (MI300X / MI350X)
+# using the HIP backend added in upstream KernelBench PR #135.
+#
+# Key differences from rl_kernelbench.yaml:
+#   - dataset_builder.backend = "hip"
+#   - dataset_builder.evaluator_backend = "local"  (no Modal — runs in-process subprocess)
+#   - dataset_builder.gpu_arch = ["gfx950"]        (MI350X; use ["gfx942"] for MI300X)
+#   - dataset_builder.precision = "fp32"
+#   - reward_static_checker_backend = "hip"
+#
+# Required Environment Variables:
+#   TINKER_API_KEY       - Tinker distributed training API key
+#   PYTORCH_ROCM_ARCH    - Set automatically by the local evaluator from gpu_arch
+#
+# Usage (on the AMD cluster, inside the apptainer container):
+#   srun --account=matx --partition=matx-interactive --gres=gpu:1 \
+#       apptainer exec --rocm /matx/u/knatalia/rocm_pytorch.sif \
+#       python -m kernelbench_tinker.scripts.train_kernel_rl \
+#           --config src/kernelbench_tinker/config/rl_kernelbench_hip.yaml \
+#           log_path=./runs/hip_rl_experiment
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model_name: "Qwen/Qwen3-30B-A3B"
+lora_rank: 64
+learning_rate: 0.000002
+
+# =============================================================================
+# Generation Configuration
+# =============================================================================
+max_tokens: 16384
+temperature: 1.0
+
+# =============================================================================
+# Multi-turn Configuration
+# =============================================================================
+multiturn:
+    enabled: true                      # Multi-turn refinement is the whole point of moving to HIP RL
+    max_turns: 4
+    gamma: 0.4
+    aggregation: "sum"
+    early_stop_on_correct: false
+    speedup_threshold: null
+    prompt_max_tokens: null
+    inject_think_token: false
+    temperature: 0.9
+    top_p: 1.0
+    seed: null
+    max_tokens_extended: 22000
+    max_tokens_extend_after_step: 30
+    loss_fn: "ppo"
+    max_grad_norm: 0.05
+    warmup_ratio: 0.03
+    clip_epsilon_low: 0.2
+    clip_epsilon_high: 0.28
+    constant_length_norm: 16384
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+num_substeps: 2
+loss_fn: "importance_sampling"
+kl_penalty_coef: 0.0
+kl_discount_factor: 0.0
+remove_constant_reward_groups: true
+
+# =============================================================================
+# Logging and Checkpointing
+# =============================================================================
+log_path: "./runs/hip_rl_default"
+save_every: 1
+wandb_project: kernelbench-tinker
+wandb_name: kb-tinker-rl-hip
+
+# =============================================================================
+# Dataset Builder Configuration
+# =============================================================================
+dataset_builder:
+    # ---------------------------------------------------------------------------
+    # Problem Selection — sweep all 300 problems across all 3 levels
+    # ---------------------------------------------------------------------------
+    level: 1
+    levels: [1, 2, 3]             # Iterate every task across every level
+    start_problem: null
+    end_problem: null
+    dataset_src: "local"          # Use local KernelBench/ submodule (HF dataset is CUDA-only)
+
+    # ---------------------------------------------------------------------------
+    # Kernel Backend — HIP via PR #135
+    # ---------------------------------------------------------------------------
+    backend: "hip"
+
+    # ---------------------------------------------------------------------------
+    # Evaluator Backend — local in-process subprocess (no Modal)
+    # ---------------------------------------------------------------------------
+    evaluator_backend: "local"
+    gpu_arch: ["gfx950"]          # MI350X; use ["gfx942"] for MI300X
+    local_timeout: 300.0          # seconds per kernel subprocess (matches eval_hip.py)
+
+    # ---------------------------------------------------------------------------
+    # Batching
+    # ---------------------------------------------------------------------------
+    batch_size: 8
+    group_size: 16
+    num_epochs: 22
+    shuffle: true
+    test_fraction: 0.1
+
+    # ---------------------------------------------------------------------------
+    # Prompt Configuration
+    # ---------------------------------------------------------------------------
+    renderer_name: "qwen3"
+    prompt_option: "one_shot"
+    prompt_precision: null
+    prompt_include_hardware: false
+    prompt_gpu_name: null
+
+    # ---------------------------------------------------------------------------
+    # Evaluation
+    # ---------------------------------------------------------------------------
+    num_correct_trials: 5
+    measure_performance: true
+    num_perf_trials: 100
+    timing_method: "cuda_event"   # Reused as the HIP-event timing path internally
+    precision: "fp32"
+    check_for_excessive_speedup: true
+    excessive_speedup_threshold: 10.0
+
+    # Modal fields kept as inert defaults (ignored when evaluator_backend == "local")
+    modal_gpu_type: "A100"
+    modal_timeout: 60.0
+
+    # ---------------------------------------------------------------------------
+    # Reward Weights
+    # ---------------------------------------------------------------------------
+    reward_format_weight: 0.0
+    reward_compile_weight: 0.0
+    reward_correctness_weight: 0.3
+    reward_speed_weight: 1.0
+    reward_length_weight: 0.0
+    reward_speed_max_reward: 10.0
+    reward_clip_min: null
+    reward_clip_max: null
+
+    # ---------------------------------------------------------------------------
+    # Reward Hacking Detection (Static Checker)
+    # ---------------------------------------------------------------------------
+    reward_enable_static_checker: true
+    reward_static_checker_backend: "hip"
+    reward_static_checker_precision: "fp32"
+    reward_static_checker_strict: null
+    reward_static_checker_warnings: null

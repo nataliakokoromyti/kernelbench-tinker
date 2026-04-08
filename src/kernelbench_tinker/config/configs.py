@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 class EvalConfig:
     """
     Configuration for kernel evaluation.
-    
-    This config is passed to Modal for kernel evaluation and controls
-    how correctness and performance are measured.
+
+    Drives correctness/performance measurement and selects the evaluator
+    backend (Modal cloud NVIDIA, or local subprocess for on-host AMD/HIP).
     """
     
     # Correctness testing
@@ -34,9 +34,17 @@ class EvalConfig:
     check_for_excessive_speedup: bool = True
     excessive_speedup_threshold: float = 10.0
     
+    # Evaluator backend selection: "modal" (cloud, NVIDIA) or "local" (in-process subprocess)
+    evaluator_backend: str = "modal"
+
     # Modal configuration
     modal_gpu_type: str = "A100"
     modal_timeout: float = 120.0
+
+    # Local evaluator configuration (used when evaluator_backend == "local")
+    # gpu_arch is passed to set_gpu_arch() — e.g. ["gfx950"] for MI350X, ["gfx942"] for MI300X
+    gpu_arch: list[str] = field(default_factory=list)
+    local_timeout: float = 300.0
 
 
 @dataclass

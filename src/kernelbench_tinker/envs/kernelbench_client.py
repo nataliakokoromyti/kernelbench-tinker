@@ -295,11 +295,12 @@ async def evaluate_kernel_async(
     cache_results: bool = True,
 ) -> KernelEvalResult:
     """
-    Evaluate a generated kernel using Modal for isolated GPU execution.
+    Evaluate a generated kernel via the currently-registered evaluator backend
+    (Modal for cloud NVIDIA, Local subprocess for on-host AMD/HIP).
 
-    This function provides:
+    Both backends provide:
     - Hard timeout enforcement (kills bad kernels after timeout)
-    - Process isolation (each kernel runs in separate container)
+    - Process isolation (each kernel runs in a fresh container or subprocess)
     - Protection against GPU corruption from bad kernels
 
     Args:
@@ -316,12 +317,17 @@ async def evaluate_kernel_async(
     Returns:
         KernelEvalResult with evaluation results
     """
-    from kernelbench_tinker.modal.evaluator import (
-        ModalEvaluatorConfig,
-        get_modal_evaluator,
+    from kernelbench_tinker.envs.evaluator_dispatch import (
+        get_current_backend,
+        get_current_evaluator,
     )
     t_total_start = time.perf_counter()
     timings: dict[str, float] = {}
+
+    # Resolve backend name once so it can flow through the cache key (a switch
+    # between Modal and Local would otherwise return stale runtimes from the
+    # other backend).
+    backend_name = get_current_backend()
 
     # Simple LRU cache to avoid re-evaluating identical kernels for the same problem.
     # We cache even failures to avoid repeatedly paying for hopeless kernels.
@@ -330,7 +336,7 @@ async def evaluate_kernel_async(
     def _make_cache_key(code: str) -> str:
         h = hashlib.sha1(code.encode("utf-8"), usedforsecurity=False).hexdigest()
         return (
-            f"{level}:{problem_id}:{backend}:{dataset_src}:"
+            f"{level}:{problem_id}:{backend}:{dataset_src}:{backend_name}:"
             f"{num_correct_trials}:{measure_performance}:{num_perf_trials}:"
             f"{precision}:{timing_method}:"
             f"{check_for_excessive_speedup}:{excessive_speedup_threshold}:"
@@ -394,12 +400,13 @@ async def evaluate_kernel_async(
         return default_result
     timings["reference_load_s"] = time.perf_counter() - ref_start
 
-    # Get Modal evaluator with configured timeout
-    config = ModalEvaluatorConfig(timeout=int(timeout))
-    evaluator = get_modal_evaluator(config)
+    # Get whichever evaluator backend was registered for this process
+    # (Modal for cloud NVIDIA, Local for on-host AMD/HIP). Falls back to
+    # Modal if nothing has been explicitly selected.
+    evaluator = get_current_evaluator()
 
-    # Run evaluation on Modal
-    modal_start = time.perf_counter()
+    # Run evaluation
+    eval_start = time.perf_counter()
     try:
         result = cast(
             KernelEvalResult,
@@ -421,25 +428,27 @@ async def evaluate_kernel_async(
             _eval_cache[cache_key] = result_copy
             _prune_cache()
 
-        timings["modal_eval_s"] = time.perf_counter() - modal_start
+        timings["eval_s"] = time.perf_counter() - eval_start
         timings["total_eval_s"] = time.perf_counter() - t_total_start
         result_metadata = result.get("metadata", {}) or {}
         result_metadata.setdefault("timings", {}).update(timings)
+        result_metadata.setdefault("evaluator_backend", backend_name)
         result["metadata"] = result_metadata
         logger.debug(
-            "Modal eval timings level=%s problem=%s ref_load=%.3fs modal=%.3fs total=%.3fs",
+            "Eval timings backend=%s level=%s problem=%s ref_load=%.3fs eval=%.3fs total=%.3fs",
+            backend_name,
             level,
             problem_id,
             timings.get("reference_load_s", 0.0),
-            timings.get("modal_eval_s", 0.0),
+            timings.get("eval_s", 0.0),
             timings.get("total_eval_s", 0.0),
         )
         return result
 
     except Exception as e:
-        default_result["error_message"] = f"Modal evaluation failed: {e}"
-        logger.exception("Modal kernel evaluation failed")
-        timings["modal_eval_s"] = time.perf_counter() - modal_start
+        default_result["error_message"] = f"{backend_name} evaluation failed: {e}"
+        logger.exception("Kernel evaluation failed (backend=%s)", backend_name)
+        timings["eval_s"] = time.perf_counter() - eval_start
         timings["total_eval_s"] = time.perf_counter() - t_total_start
         default_result["metadata"]["timings"] = timings
         if cache_results:

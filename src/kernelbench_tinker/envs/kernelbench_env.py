@@ -384,9 +384,17 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     prompt_include_hardware: bool = False
     prompt_gpu_name: str | None = None
 
+    # Evaluator backend selection: "modal" (cloud NVIDIA) or "local" (in-process subprocess for AMD/HIP)
+    evaluator_backend: str = "modal"
+
     # Modal configuration (isolated GPU evaluation)
     modal_gpu_type: str = "A100"  # GPU type to use on Modal
     modal_timeout: float = 120.0  # Timeout in seconds per kernel
+
+    # Local evaluator configuration (used when evaluator_backend == "local")
+    # gpu_arch is passed to set_gpu_arch() — e.g. ["gfx950"] for MI350X, ["gfx942"] for MI300X
+    gpu_arch: list[str] | None = None
+    local_timeout: float = 300.0
 
     async def __call__(self, tokenizer=None) -> tuple[RLDataset, RLDataset | None]:
         """Build train and optional test datasets.
@@ -462,8 +470,11 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             precision=self.precision,
             check_for_excessive_speedup=self.check_for_excessive_speedup,
             excessive_speedup_threshold=self.excessive_speedup_threshold,
+            evaluator_backend=self.evaluator_backend,
             modal_gpu_type=self.modal_gpu_type,
             modal_timeout=self.modal_timeout,
+            gpu_arch=list(self.gpu_arch) if self.gpu_arch else [],
+            local_timeout=self.local_timeout,
         )
 
         # Create reward config
@@ -483,19 +494,10 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
             static_checker_warnings=self.reward_static_checker_warnings,
         )
 
-        # Configure Modal evaluator with the same config
-        from kernelbench_tinker.modal.evaluator import (
-            ModalEvaluatorConfig,
-            ModalKernelEvaluator,
-            set_modal_evaluator,
-        )
-        modal_config = ModalEvaluatorConfig(
-            enabled=True,
-            gpu_type=eval_config.modal_gpu_type,
-            timeout=int(eval_config.modal_timeout),
-        )
-        set_modal_evaluator(ModalKernelEvaluator(modal_config))
-        logger.info(f"Modal evaluator configured: GPU={eval_config.modal_gpu_type}, timeout={eval_config.modal_timeout}s")
+        # Install the appropriate evaluator backend (modal vs local).
+        # Both expose the same async surface, so call sites stay agnostic.
+        from kernelbench_tinker.envs.evaluator_dispatch import set_evaluator_from_eval_config
+        set_evaluator_from_eval_config(eval_config)
 
         # Create train dataset
         train_dataset = KernelBenchRLDataset(
