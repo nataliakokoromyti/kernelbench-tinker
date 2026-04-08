@@ -27,6 +27,33 @@ max_tokens: 16384
 temperature: 1.0
 
 # =============================================================================
+# Multi-turn Configuration (disabled by default)
+# =============================================================================
+multiturn:
+    enabled: false                     # true to enable iterative refinement
+    max_turns: 4                       # Maximum refinement turns per trajectory
+    gamma: 0.4                         # Discount factor for multi-turn returns
+    aggregation: "sum"                 # "sum" (reward many good kernels) or "max" (reward one great kernel)
+    early_stop_on_correct: false       # Stop episode when kernel passes all tests
+    speedup_threshold: null            # Required speedup before early stopping (null = any correct)
+    # Prompt
+    prompt_max_tokens: null            # Token budget for history truncation (null = char fallback)
+    inject_think_token: false          # Append <think>\n to generation prompts
+    # Generation
+    temperature: 0.9                   # Generation temperature
+    top_p: 1.0                         # Nucleus sampling (1.0 = disabled)
+    seed: null                         # Random seed for generation (null = random)
+    max_tokens_extended: 22000         # Extend max_tokens mid-training (0 = disabled)
+    max_tokens_extend_after_step: 30   # Step at which to switch
+    # Training
+    loss_fn: "ppo"                     # Loss function (single-turn uses top-level loss_fn)
+    max_grad_norm: 0.05                # Gradient clipping (0.0 = disabled)
+    warmup_ratio: 0.03                 # Linear LR warmup fraction
+    clip_epsilon_low: 0.2              # PPO clip lower bound
+    clip_epsilon_high: 0.28            # PPO clip upper bound (Clip-High)
+    constant_length_norm: 16384        # GRPO constant length normalization (0 = disabled)
+
+# =============================================================================
 # Training Configuration
 # =============================================================================
 num_substeps: 2
@@ -57,6 +84,7 @@ dataset_builder:
     # Problem Selection
     # ---------------------------------------------------------------------------
     level: 1                      # KernelBench level (1, 2, 3, or 4)
+    levels: null                  # Train on multiple levels (e.g. [1, 2]); overrides level when set
     start_problem: null           # First problem ID (null = start from 1)
     end_problem: null             # Last problem ID (null = all problems)
     dataset_src: "huggingface"    # "huggingface" or "local"
@@ -107,6 +135,9 @@ dataset_builder:
     reward_correctness_weight: 0.3
     reward_speed_weight: 1.0
     reward_length_weight: 0.0
+    reward_speed_max_reward: 10.0     # Cap on speed reward component (set high to uncap)
+    reward_clip_min: null             # Lower bound on total reward (null = no clipping)
+    reward_clip_max: null             # Upper bound on total reward (null = no clipping)
 
     # ---------------------------------------------------------------------------
     # Reward Hacking Detection (Static Checker)
